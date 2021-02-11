@@ -25,6 +25,7 @@ class App:
         pass
 
 
+# TODO expose apps over an RPC interface
 class Echo(App):
     name = "Echo"
     desc = "A simple echo app"

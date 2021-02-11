@@ -22,7 +22,9 @@ class MainApp:
         # TODO permissions for apps
 
         # registered apps
-        self.apps: Dict[str, Type[App]] = {app.name: app for app in apps}
+        self.apps: Dict[str, Type[App]] = {
+            app.name.lower(): app for app in apps
+        }
 
         # running apps
         self.running_apps: Dict[str, App] = {}
@@ -53,8 +55,6 @@ class MainApp:
             return
         content = dataMessage['message']
 
-        print("main got content", source, content)
-
         processed = False
         for cmd in self.commands:
             if content.lower().startswith(cmd):
@@ -77,6 +77,8 @@ class MainApp:
 
     def startapp(self, source, content):
         app = ' '.join(content.split(' ')[1:]) # TOOD more validation?
+        app = app.lower()
+
         if app not in self.apps:
             self.sender.send(
                 source,
