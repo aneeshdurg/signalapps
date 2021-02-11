@@ -1,37 +1,46 @@
-from typing import Callable
+from abc import abstractmethod
+from typing import Callable, Type
 
 from sender import Sender
 
 
 class App:
-    name: str
-    desc: str
-
     def __init__(
         self,
+        server: 'AppServer',
         source: str,
         content: str,
         sender: Sender,
         terminate_cb: Callable[[], None]
     ) -> None:
+        self.server = server
         self.user = source
         self.sender = sender
         self.terminate_cb = terminate_cb
 
+    @abstractmethod
     def recv(self, msg: str) -> None:
-        pass
+        ...
 
     def stop(self) -> None:
         pass
 
+class AppServer:
+    name: str
+    desc: str
+
+    @abstractmethod
+    def vend(self) -> Type[App]:
+        ...
+
+    def stop(self) -> None:
+        pass
 
 # TODO expose apps over an RPC interface
 class Echo(App):
-    name = "Echo"
-    desc = "A simple echo app"
-
     def __init__(
         self,
+        server: AppServer,
         source: str,
         content: str,
         sender: Sender,
@@ -47,3 +56,11 @@ class Echo(App):
 
     def recv(self, msg: str) -> None:
         self.sender.send(self.user, msg)
+
+
+class EchoServer(AppServer):
+    name = "Echo"
+    desc = "A simple echo app"
+
+    def vend(self) -> Type[App]:
+        return Echo

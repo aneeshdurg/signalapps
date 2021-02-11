@@ -3,9 +3,9 @@ import re
 from enum import Enum
 from queue import Queue
 from threading import Thread
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Type
 
-from apps import App
+from apps import App, AppServer
 from sender import Sender
 
 
@@ -120,9 +120,16 @@ class Lobby:
         self.active_players = set()
 
         self.thread = Thread(target=self.poll_lobby)
-        self.thread.start()
+        self.started = True
 
         self.gameid = 0
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.players.put(None)
+        self.thread.join()
 
     def add(self, player: 'TicTacToe') -> None:
         self.players.put(player)
@@ -138,10 +145,14 @@ class Lobby:
             pass
 
     def poll_lobby(self) -> None:
+        done = False
         while True:
             players = []
             while len(players) != 2:
                 player = self.players.get()
+                if player is None:
+                    done = True
+                    break
 
                 # The other player might have disconnected
                 if len(players) and players[0] not in self.active_players:
@@ -153,6 +164,9 @@ class Lobby:
 
                 players.append(player)
 
+            if done:
+                break
+
             for player in players:
                 self.active_players.remove(player)
 
@@ -161,21 +175,19 @@ class Lobby:
             self.gameid += 1
 
 
-LOBBY = Lobby()
-
-
 class TicTacToe(App):
-    name = "TicTacToe"
-    desc = "tic tac toe! Play alone or with others"
-
     def __init__(
         self,
+        server: AppServer,
         source: str,
         content: str,
         sender: Sender,
         terminate_cb: Callable[[], None]
     ) -> None:
-        super().__init__(source, content, sender, terminate_cb)
+        super().__init__(server, source, content, sender, terminate_cb)
+
+        assert isinstance(self.server, TicTacToeServer)
+        self.lobby = self.server.lobby
 
         self.state = State.MAINMENU
         self.opponent = None
@@ -214,7 +226,7 @@ class TicTacToe(App):
         if self.state == State.MAINMENU:
             if msg == 'a':
                 self.state = State.LOBBY
-                LOBBY.add(self)
+                self.lobby.add(self)
                 self.send_lobby_msg()
             elif msg == 'b':
                 self.state = State.CPUGAME
@@ -225,7 +237,7 @@ class TicTacToe(App):
             if msg != 'q':
                 self.send_lobby_msg()
             else:
-                LOBBY.remove(self)
+                self.lobby.remove(self)
                 self.state = State.MAINMENU
                 self.send_mainmenu()
         elif self.state == State.PLAYERGAME:
@@ -263,3 +275,18 @@ class TicTacToe(App):
         self.stopped = True
         if self.board:
             self.board.forfeit(self.idx)
+
+
+class TicTacToeServer(AppServer):
+    name = "TicTacToe"
+    desc = "tic tac toe! Play alone or with others"
+
+    def __init__(self, lobby: Lobby) -> None:
+        self.lobby = lobby
+        self.lobby.start()
+
+    def vend(self) -> Type[App]:
+        return TicTacToe
+
+    def stop(self) -> None:
+        self.lobby.stop()

@@ -3,7 +3,7 @@ import subprocess
 
 from typing import List, Type
 
-from apps import App, Echo
+from apps import App, AppServer, EchoServer
 from receiver import Receiver
 from sender import Sender
 from signalcli import SignalCliDaemon, SignalCliReceiver, SignalCliSender
@@ -11,7 +11,10 @@ from signalcli import SignalCliDaemon, SignalCliReceiver, SignalCliSender
 
 class MainApp:
     def __init__(
-        self, receiver: Receiver, sender: Sender, apps: List[Type[App]]
+        self,
+        receiver: Receiver,
+        sender: Sender,
+        appservers: List[Type[AppServer]]
     ) -> None:
         self.receiver = receiver
         self.sender = sender
@@ -22,8 +25,8 @@ class MainApp:
         # TODO permissions for apps
 
         # registered apps
-        self.apps: Dict[str, Type[App]] = {
-            app.name.lower(): app for app in apps
+        self.appservers: Dict[str, Type[AppServer]] = {
+            app.name.lower(): app for app in appservers
         }
 
         # running apps
@@ -71,7 +74,7 @@ class MainApp:
             "contact your admin to install more!\n\n"
         )
 
-        for app in self.apps.values():
+        for app in self.appservers.values():
             output += f"{app.name}    {app.desc}\n"
         self.sender.send(source, output)
 
@@ -79,7 +82,7 @@ class MainApp:
         app = ' '.join(content.split(' ')[1:]) # TOOD more validation?
         app = app.lower()
 
-        if app not in self.apps:
+        if app not in self.appservers:
             self.sender.send(
                 source,
                 "Couldn't find an app with that name."
@@ -92,8 +95,12 @@ class MainApp:
             )
         else:
             self.sender.send(source, f"Starting app {app}")
-            self.running_apps[source] = self.apps[app](
-                source, content, self.sender, lambda: self.endapp(source, "")
+            self.running_apps[source] = self.appservers[app].vend()(
+                self.appservers[app],
+                source,
+                content,
+                self.sender,
+                lambda: self.endapp(source, "")
             )
 
     def currentapp(self, source, content):
@@ -101,7 +108,7 @@ class MainApp:
             self.sender.send(source, "You're not currently running any apps.")
         else:
             app = self.running_apps[source]
-            self.sender.send(source, f"{app.name}    {app.desc}")
+            self.sender.send(source, f"{app.server.name}    {app.server.desc}")
 
     def endapp(self, source, content):
         if source not in self.running_apps:
@@ -109,8 +116,17 @@ class MainApp:
         else:
             app = self.running_apps[source]
             app.stop()
-            self.sender.send(source, f"Stopped {app.name}")
+            self.sender.send(source, f"Stopped {app.server.name}")
             del self.running_apps[source]
+
+    def shutdown(self) -> None:
+        for source in self.running_apps:
+            self.running_apps[source].stop()
+            self.sender.send(source, f"SERVER IS SHUTTING DOWN...")
+
+        for app in self.appservers:
+            self.appservers[app].stop()
+
 
 
 def main():
@@ -120,7 +136,7 @@ def main():
     daemon = SignalCliDaemon(config["username"])
     recv = SignalCliReceiver(daemon)
     send = SignalCliSender(daemon)
-    MainApp(recv, send, [Echo])
+    MainApp(recv, send, [EchoServer()])
 
 if __name__ == "__main__":
     main()
