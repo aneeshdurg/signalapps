@@ -46,7 +46,7 @@ class Echo(App):
         sender: Sender,
         terminate_cb: Callable[[], None]
     ) -> None:
-        super().__init__(source, content, sender, terminate_cb)
+        super().__init__(server, source, content, sender, terminate_cb)
 
         print(self.user, self.sender)
         self.sender.send(

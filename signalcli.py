@@ -17,6 +17,8 @@ def do_chdir():
 
 class SignalCliDaemon:
     def __init__(self, user: str) -> None:
+        self.lock = threading.Lock()
+
         self.user = user
 
         self.recv_cmd = [
@@ -49,20 +51,21 @@ class SignalCliDaemon:
         self.on_msg = on_msg_cb
 
     def start_recv(self):
-        self.cli_proc = subprocess.Popen(
-            self.recv_cmd, stdout=subprocess.PIPE, preexec_fn=do_chdir
-        )
+        with self.lock:
+            self.cli_proc = subprocess.Popen(
+                self.recv_cmd, stdout=subprocess.PIPE, preexec_fn=do_chdir
+            )
 
-        def reader_thread():
-            while not self._stop_recv:
-                msg = self.cli_proc.stdout.readline()
-                if msg:
-                    print("daemon got msg", msg)
-                    self.on_msg(msg)
-        self.reader_thread = threading.Thread(target=reader_thread)
-        self.reader_thread.start()
+            def reader_thread():
+                while not self._stop_recv:
+                    msg = self.cli_proc.stdout.readline()
+                    if msg:
+                        print("daemon got msg", msg)
+                        self.on_msg(msg)
+            self.reader_thread = threading.Thread(target=reader_thread)
+            self.reader_thread.start()
 
-    def stop_recv(self):
+    def _do_stop_recv(self):
         self._stop_recv = True
 
         print("Waiting for cliproc");
@@ -75,10 +78,15 @@ class SignalCliDaemon:
         print("done Waiting for rthread");
         self._stop_recv = False
 
+    def stop_recv(self):
+        with self.lock:
+            self._do_stop_recv()
 
     def send(self, dest: str, msg: str) -> None:
-        self.stop_recv()
-        subprocess.check_call(self.send_cmd + [msg, dest], preexec_fn=do_chdir)
+        with self.lock:
+            self._do_stop_recv()
+            subprocess.check_call(
+                self.send_cmd + [msg, dest], preexec_fn=do_chdir)
         self.start_recv()
 
 
