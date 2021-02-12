@@ -1,4 +1,6 @@
+import random
 import re
+import textwrap
 
 from enum import Enum
 from queue import Queue
@@ -6,20 +8,19 @@ from threading import Thread
 from typing import Callable, Dict, List, Optional, Set, Type
 
 from apps import App, AppServer
-from sender import Sender
+from sender import NullSender, Sender
 
 
 class State(Enum):
     MAINMENU = "MAINMENU"
     LOBBY = "LOBBY"
-    CPUGAME = "CPUGAME"
-    PLAYERGAME = "PLAYERGAME"
+    GAME = "GAME"
 
 
 class Board:
     letters = ['X', 'O']
 
-    def __init__(self, gameid: int, players: 'TicTacToe') -> None:
+    def __init__(self, gameid: object, players: 'TicTacToe') -> None:
         self.id = gameid
 
         self.state = [
@@ -29,8 +30,8 @@ class Board:
         ];
 
         for idx, player in enumerate(players):
-            player.board_send(self.id, "Connected! Starting game.")
             player.setboard(self, idx)
+            player.board_send(self.id, "Connected! Starting game.")
         self.players = players
         self.turn = 0
         self.send_board()
@@ -186,6 +187,7 @@ class TicTacToe(App):
     ) -> None:
         super().__init__(server, source, content, sender, terminate_cb)
 
+        print(server, self.server, source, content, sender)
         assert isinstance(self.server, TicTacToeServer)
         self.lobby = self.server.lobby
 
@@ -229,8 +231,8 @@ class TicTacToe(App):
                 self.lobby.add(self)
                 self.send_lobby_msg()
             elif msg == 'b':
-                self.state = State.CPUGAME
-                # TODO
+                self.state = State.LOBBY
+                board = Board('COM', [self, TicTacToeCom(self.server)])
             else:
                 self.send_mainmenu()
         elif self.state == State.LOBBY:
@@ -240,7 +242,7 @@ class TicTacToe(App):
                 self.lobby.remove(self)
                 self.state = State.MAINMENU
                 self.send_mainmenu()
-        elif self.state == State.PLAYERGAME:
+        elif self.state == State.GAME:
             if msg == 'f':
                 self.board.forfeit(self.idx)
                 self.gameover()
@@ -257,9 +259,9 @@ class TicTacToe(App):
             self.board = board
             self.boardid = board.id
             self.idx = idx
-            self.state = State.PLAYERGAME
+            self.state = State.GAME
 
-    def board_send(self, boardid: int, msg: str) -> None:
+    def board_send(self, boardid: object, msg: str) -> None:
         if self.stopped or boardid != self.boardid:
             return
         self.sender.send(self.user, msg)
@@ -275,6 +277,33 @@ class TicTacToe(App):
         self.stopped = True
         if self.board:
             self.board.forfeit(self.idx)
+
+class TicTacToeCom(TicTacToe):
+    def __init__(self, server) -> None:
+        super().__init__(
+            server, "COM", "", NullSender(), lambda : None
+        )
+        self.board = None
+
+    def setboard(self, board: Board, idx: int) -> None:
+        self.board = board
+        self.idx = idx
+
+    def board_send(self, _id: object, msg: str) -> None:
+        if "your turn" not in msg:
+            return
+        else:
+            x = None
+            y = None
+            while True:
+                x = random.randint(0, 2)
+                y = random.randint(0, 2)
+                if self.board.state[y][x] == None:
+                    break
+            self.board.move(self.idx, x, y)
+
+    def gameover(self) -> None:
+        pass
 
 
 class TicTacToeServer(AppServer):

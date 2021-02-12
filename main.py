@@ -68,7 +68,7 @@ class MainApp:
         if not processed and source in self.running_apps:
             self.running_apps[source].recv(content)
 
-    def listapps(self, source, content):
+    def listapps(self, source: str, content: str) -> None:
         output = (
             "Here's a list of installed apps, "
             "contact your admin to install more!\n\n"
@@ -78,7 +78,7 @@ class MainApp:
             output += f"{app.name}    {app.desc}\n"
         self.sender.send(source, output)
 
-    def startapp(self, source, content):
+    def startapp(self, source: str, content: str) -> None:
         app = ' '.join(content.split(' ')[1:]) # TOOD more validation?
         app = app.lower()
 
@@ -103,14 +103,14 @@ class MainApp:
                 lambda: self.endapp(source, "")
             )
 
-    def currentapp(self, source, content):
+    def currentapp(self, source: str, content: str) -> None:
         if source not in self.running_apps:
             self.sender.send(source, "You're not currently running any apps.")
         else:
             app = self.running_apps[source]
             self.sender.send(source, f"{app.server.name}    {app.server.desc}")
 
-    def endapp(self, source, content):
+    def endapp(self, source: str, content: str) -> None:
         if source not in self.running_apps:
             self.sender.send(source, "You're not currently running any apps.")
         else:
@@ -127,6 +127,7 @@ class MainApp:
         for app in self.appservers:
             self.appservers[app].stop()
 
+        self.receiver.stop()
 
 
 def main():
