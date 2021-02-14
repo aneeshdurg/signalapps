@@ -20,7 +20,6 @@ class MainApp:
         self.sender = sender
 
         self.receiver.add_cb(self.on_msg)
-        self.receiver.start()
 
         # TODO permissions for apps
 

@@ -4,9 +4,6 @@ from receiver import Receiver
 from sender import Sender
 
 class MockReceiver(Receiver):
-    def start(self) -> None:
-        pass
-
     def stop(self) -> None:
         pass
 
