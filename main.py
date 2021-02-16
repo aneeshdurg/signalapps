@@ -12,10 +12,13 @@ from signalcli import SignalCliDaemon, SignalCliReceiver, SignalCliSender
 class MainApp:
     def __init__(
         self,
+        config: dict,
         receiver: Receiver,
         sender: Sender,
         appservers: List[Type[AppServer]]
     ) -> None:
+        self.config = config
+
         self.receiver = receiver
         self.sender = sender
 
@@ -128,15 +131,18 @@ class MainApp:
 
         self.receiver.stop()
 
+    def invite(self, user: str) -> None:
+        self.sender.send(user, self.config['welcomemsg'])
+
 
 def main():
-    with open('user.json') as f:
+    with open('config.json') as f:
         config = json.load(f)
 
     daemon = SignalCliDaemon(config["username"])
     recv = SignalCliReceiver(daemon)
     send = SignalCliSender(daemon)
-    MainApp(recv, send, [EchoServer()])
+    MainApp(config, recv, send, [EchoServer()])
 
 if __name__ == "__main__":
     main()

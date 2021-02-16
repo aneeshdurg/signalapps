@@ -70,9 +70,13 @@ class SignalCliReceiver(Receiver):
                 msg = self.msgs.get()
                 if msg is None:
                     break
-                msg = json.loads(msg.decode())
-                for cb in self.cbs:
-                    cb(msg)
+                try:
+                    msg = json.loads(msg.decode())
+                    for cb in self.cbs:
+                        cb(msg)
+                except:
+                    print("Could not decode msg")
+                    print(msg)
         self.cb_thread = threading.Thread(target=cb_thread)
         self.cb_thread.start()
 
