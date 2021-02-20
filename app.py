@@ -19,6 +19,10 @@ class App:
         self.terminate_cb = terminate_cb
 
     @abstractmethod
+    def start(self) -> None:
+        pass
+
+    @abstractmethod
     def recv(self, msg: str) -> None:
         ...
 
@@ -38,17 +42,7 @@ class AppServer:
 
 # TODO expose apps over an RPC interface
 class Echo(App):
-    def __init__(
-        self,
-        server: AppServer,
-        source: str,
-        content: str,
-        sender: Sender,
-        terminate_cb: Callable[[], None]
-    ) -> None:
-        super().__init__(server, source, content, sender, terminate_cb)
-
-        print(self.user, self.sender)
+    def start(self) -> None:
         self.sender.send(
             self.user,
             "Welcome to echo! Anything you send will be echoed back."

@@ -3,7 +3,7 @@ import subprocess
 
 from typing import List, Type
 
-from apps import App, AppServer, EchoServer
+from app import App, AppServer, EchoServer
 from receiver import Receiver
 from sender import Sender
 from signalcli import SignalCliDaemon, SignalCliReceiver, SignalCliSender
@@ -104,6 +104,7 @@ class MainApp:
                 self.sender,
                 lambda: self.endapp(source, "")
             )
+            self.running_apps[source].start()
 
     def currentapp(self, source: str, content: str) -> None:
         if source not in self.running_apps:
@@ -130,9 +131,6 @@ class MainApp:
             self.appservers[app].stop()
 
         self.receiver.stop()
-
-    def invite(self, user: str) -> None:
-        self.sender.send(user, self.config['welcomemsg'])
 
 
 def main():

@@ -4,14 +4,17 @@ from time import sleep
 
 import main
 import mocks
-from progs.tictactoe import Lobby, TicTacToeServer
+from apps.tictactoe import Lobby, TicTacToeServer
 
 class TestTicTacToe(unittest.TestCase):
     def setUp(self) -> None:
         self.sender = mocks.MockSender(silence=True)
         self.receiver = mocks.MockReceiver()
         self.server = TicTacToeServer(Lobby())
-        self.app = main.MainApp(self.receiver, self.sender, [self.server])
+        test_config = {}
+        self.app = main.MainApp(
+            test_config, self.receiver, self.sender, [self.server]
+        )
 
     def tearDown(self) -> None:
         self.app.shutdown()

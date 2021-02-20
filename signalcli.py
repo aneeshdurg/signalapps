@@ -16,8 +16,6 @@ def do_chdir():
 
 class SignalCliDaemon:
     def __init__(self, user: str) -> None:
-        self.lock = threading.Lock()
-
         self.user = user
         daemon_cmd = [SIGNALCLI_PATH, 'daemon']
         self.daemon = subprocess.Popen(

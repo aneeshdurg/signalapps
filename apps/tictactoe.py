@@ -7,7 +7,7 @@ from queue import Queue
 from threading import Thread
 from typing import Callable, Dict, List, Optional, Set, Type
 
-from apps import App, AppServer
+from app import App, AppServer
 from sender import NullSender, Sender
 
 
@@ -187,22 +187,23 @@ class TicTacToe(App):
     ) -> None:
         super().__init__(server, source, content, sender, terminate_cb)
 
-        print(server, self.server, source, content, sender)
         assert isinstance(self.server, TicTacToeServer)
         self.lobby = self.server.lobby
 
         self.state = State.MAINMENU
         self.opponent = None
 
-        self.sender.send(self.user, "Welcome to tic tac toe!")
-        self.send_mainmenu()
         self.stopped = False
 
         self.board = None
         self.boardid = None
         self.idx = None
 
-    def send_mainmenu(self):
+    def start(self) -> None:
+        self.sender.send(self.user, "Welcome to tic tac toe!")
+        self.send_mainmenu()
+
+    def send_mainmenu(self) -> None:
         self.sender.send(
             self.user,
             "Send (a) to join the lobby. Send (b) to play against a computer."
