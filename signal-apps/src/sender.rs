@@ -5,5 +5,5 @@ pub trait Sender {
 pub struct NullSender { }
 
 impl Sender for NullSender {
-    fn send(&self, dest: &str, msg: &str) { }
+    fn send(&self, _dest: &str, _msg: &str) { }
 }

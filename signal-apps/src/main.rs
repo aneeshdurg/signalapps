@@ -7,28 +7,27 @@ use serde_json;
 use signal_hook::consts::signal::SIGINT;
 use signal_hook::iterator::Signals;
 
+mod receiver;
+mod sender;
 mod signalcli;
 
-mod receiver;
-
 use crate::receiver::Receiver;
+use crate::sender::Sender;
 use crate::signalcli::SignalCliDaemon;
 
-struct MainApp<Recv: Receiver + Send + Sync> {
-    config: serde_json::Value,
-    receiver: Recv,
+struct MainApp<I> where I: Receiver + Sender + Send + Sync
+{
+    interface: I,
 }
 
-impl<R: Receiver + Send + Sync> MainApp<R> {
-    fn new(config: serde_json::Value, receiver: R) -> Self {
-        MainApp {
-            config,
-            receiver
-        }
+impl<I> MainApp<I> where I: Receiver + Sender + Send + Sync
+{
+    fn new(interface: I) -> Self {
+        MainApp { interface }
     }
 
     fn main_loop(&mut self) {
-        let recv = &self.receiver;
+        let recv = &self.interface;
 
         thread::scope(|s| {
             let mut signals = Signals::new(&[SIGINT]).unwrap();
@@ -39,8 +38,11 @@ impl<R: Receiver + Send + Sync> MainApp<R> {
                     let msg = recv.get_msg();
                     println!("got msg {:?}", msg);
                     if msg.len() == 0 {
+                        eprintln!("Exiting main_thread");
                         break;
                     }
+                    // TODO don't just send, read the message as json.
+                    Sender::send(&self.interface, "+15123006857", "hi");
                 }
             });
 
@@ -56,7 +58,7 @@ impl<R: Receiver + Send + Sync> MainApp<R> {
             main_thread.join().expect("Thread failed to join.");
         }).unwrap();
 
-        Receiver::stop(&mut self.receiver);
+        Receiver::stop(&mut self.interface);
     }
 }
 
@@ -78,5 +80,5 @@ fn main() {
     eprintln!("Starting as user {:?}", user);
     let daemon = SignalCliDaemon::new(user);
 
-    MainApp::new(config, daemon).main_loop();
+    MainApp::new(daemon).main_loop();
 }

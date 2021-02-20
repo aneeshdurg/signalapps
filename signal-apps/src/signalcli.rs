@@ -8,6 +8,7 @@ extern crate multiqueue;
 use subprocess::{Popen, PopenConfig, Redirection};
 
 use crate::receiver::Receiver;
+use crate::sender::Sender;
 
 static SIGNALCLI_PATH: &str = "../signal-cli/build/install/signal-cli/bin/signal-cli";
 
@@ -15,9 +16,10 @@ static SIGNALCLI_PATH: &str = "../signal-cli/build/install/signal-cli/bin/signal
 const BUFFER_LEN: usize = 1024;
 
 pub struct SignalCliDaemon {
+    user: String,
     daemon: Popen,
     recvproc: Arc<Mutex<Popen>>,
-    recv_chan: Arc<Mutex<multiqueue::MPMCReceiver<String>>>,
+    recv_chan: Mutex<multiqueue::MPMCReceiver<String>>,
     send_chan: Arc<Mutex<multiqueue::MPMCSender<String>>>
 }
 
@@ -58,7 +60,7 @@ impl SignalCliDaemon {
         let (tx, rx) = multiqueue::mpmc_queue(10);
 
         let send_chan = Arc::new(Mutex::new(tx));
-        let recv_chan = Arc::new(Mutex::new(rx));
+        let recv_chan = Mutex::new(rx);
 
         let tx = send_chan.clone();
         spawn(move || {
@@ -105,12 +107,12 @@ impl SignalCliDaemon {
                 }
 
                 let msg = String::from_utf8(msg[0..i].to_vec()).unwrap();
-                eprintln!("Got msg {:?}", msg);
                 tx.lock().unwrap().try_send(msg).expect("Sending received msg failed!");
             }
         });
 
         SignalCliDaemon {
+            user: user.to_string(),
             daemon,
             recvproc,
             recv_chan,
@@ -140,4 +142,25 @@ impl Receiver for SignalCliDaemon {
     }
 
 
+}
+
+impl Sender for SignalCliDaemon {
+    fn send(&self, dest: &str, msg: &str) {
+        Popen::create(
+            &[
+                SIGNALCLI_PATH,
+                "--dbus",
+                "-u",
+                &self.user,
+                "send",
+                "-m",
+                msg,
+                dest,
+            ],
+            PopenConfig {
+                stdout: Redirection::File(File::create("/dev/null").unwrap()),
+                ..Default::default()
+            },
+        ).unwrap().wait().expect("Send failed!");
+    }
 }
