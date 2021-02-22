@@ -13,71 +13,61 @@ mod signalcli;
 use crate::comm::{Control, Receiver, Sender};
 use crate::signalcli::SignalCliDaemon;
 
-struct MainApp<C, R, S>
-where
-    C: Control,
-    R: Receiver,
-    S: Sender,
-{
-    control: C,
-    recv: R,
-    send: S,
-}
-
-impl<C, R, S> MainApp<C, R, S>
-where
-    C: Control,
-    R: Receiver,
-    S: Sender,
-{
-    fn new(control: C, recv: R, send: S) -> Self {
-        MainApp {
-            control,
-            recv,
-            send,
+fn get_msg(msg: &serde_json::Value) -> Option<(&str, &str)> {
+    let envelope = &msg["envelope"];
+    if let Some(source) = envelope["source"].as_str() {
+        if let Some(content) = envelope["dataMessage"]["message"].as_str() {
+            return Some((source, content));
         }
     }
 
-    async fn main_loop(&mut self) {
-        let signals = Signals::new(&[SIGINT]).unwrap();
-        let handle = signals.handle();
+    None
+}
 
-        let recv = &mut self.recv;
-        let sender = &self.send;
-        let main_thread = async {
-            println!("Setup main_thread");
-            loop {
-                let msg = recv.get_msg().await;
-                let msg = match msg.as_ref().map(|x| x.as_str()) {
-                    None | Some("") => { break; }
-                    Some(msg) => msg
-                };
-                println!("got msg {:?}", msg);
+async fn main_loop<C, R, S>(control: C, mut recv: R, sender: S)
+where
+    C: Control,
+    R: Receiver,
+    S: Sender,
+{
+    let signals = Signals::new(&[SIGINT]).unwrap();
+    let handle = signals.handle();
 
-                println!("begin send");
-                // TODO don't just send, read the message as json.
-                sender.send("+15123006857", "hi");
-                println!("done send");
+    let main_thread = async {
+        println!("Setup main_thread");
+        loop {
+            let msg = recv.get_msg().await;
+            let msg = match msg.as_ref().map(String::as_str) {
+                None | Some("") => {
+                    break;
+                }
+                Some(msg) => msg,
+            };
+
+            if let Ok(Some((source, msg))) =
+                serde_json::from_str::<serde_json::Value>(msg)
+                    .as_ref()
+                    .map(get_msg)
+            {
+                sender.send(source, msg);
             }
+        }
 
-            eprintln!("Exiting main thread");
-        };
+        eprintln!("Exiting main thread");
+    };
 
-        let control = &mut self.control;
-        let signal_thread = async {
-            let mut signals = signals.fuse();
-            eprintln!("Waiting for signals");
-            while let None = signals.next().await { }
-            eprintln!("Got exit signal");
-            handle.close();
+    let signal_thread = async {
+        let mut signals = signals.fuse();
+        eprintln!("Waiting for signals");
+        while let None = signals.next().await {}
+        eprintln!("Got exit signal");
+        handle.close();
 
-            control.insert_msg("");
-            eprintln!("sent sentinel");
-        };
+        control.insert_msg("");
+        eprintln!("sent sentinel");
+    };
 
-        join!(main_thread, signal_thread);
-        control.stop();
-    }
+    join!(main_thread, signal_thread);
 }
 
 #[tokio::main]
@@ -99,8 +89,8 @@ async fn main() -> Result<()> {
         .expect("config json needs a username key");
     eprintln!("Starting as user {:?}", user);
 
-    let (control, recv, send) = SignalCliDaemon::new(user);
-    MainApp::new(control, recv, send).main_loop().await;
+    let (control, recv, send) = SignalCliDaemon::new(user)?;
+    main_loop(control, recv, send).await;
 
     Ok(())
 }

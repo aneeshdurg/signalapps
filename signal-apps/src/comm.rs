@@ -7,7 +7,6 @@ pub trait Receiver {
 
 pub trait Control {
     fn insert_msg(&self, msg: &str);
-    fn stop(&mut self);
 }
 
 pub trait Sender {

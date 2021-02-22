@@ -1,3 +1,4 @@
+use std::io::Result;
 use std::str;
 use std::sync::Arc;
 
@@ -20,28 +21,27 @@ pub struct SignalCliSender {
 }
 
 pub struct SignalCliDaemon {
-    daemon: Option<Child>,
-    recvproc: Option<Child>,
+    _daemon: Child,
+    _recvproc: Child,
     send_chan: Arc<mpsc::Sender<String>>,
 }
 
 impl SignalCliDaemon {
-    pub fn new(user: &str) -> (Self, SignalCliReciever, SignalCliSender) {
-        // TODO legit error handling
-        let daemon = Some(
-            Command::new(SIGNALCLI_PATH)
-                .arg("daemon")
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
+    pub fn new(
+        user: &str,
+    ) -> Result<(Self, SignalCliReciever, SignalCliSender)> {
+        let _daemon = Command::new(SIGNALCLI_PATH)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
 
         let (tx, rx) = mpsc::channel(10);
 
         let recv_chan = rx;
         let send_chan = Arc::new(tx);
 
-        let mut recvproc = Command::new(SIGNALCLI_PATH)
+        let mut _recvproc = Command::new(SIGNALCLI_PATH)
             .arg("--dbus")
             .arg("--output=json")
             .arg("-u")
@@ -50,10 +50,9 @@ impl SignalCliDaemon {
             .arg("--timeout")
             .arg("-1") /* disable timeout */
             .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let recvout = recvproc.stdout.take().unwrap();
-        let recvproc = Some(recvproc);
+            .kill_on_drop(true)
+            .spawn()?;
+        let recvout = _recvproc.stdout.take().unwrap();
 
         {
             let send_chan = send_chan.clone();
@@ -68,17 +67,17 @@ impl SignalCliDaemon {
             });
         }
 
-        (
+        Ok((
             SignalCliDaemon {
-                daemon,
-                recvproc,
+                _daemon,
+                _recvproc,
                 send_chan,
             },
             SignalCliReciever { recv_chan },
             SignalCliSender {
                 user: user.to_string(),
             },
-        )
+        ))
     }
 }
 
@@ -87,28 +86,6 @@ impl Control for SignalCliDaemon {
         self.send_chan
             .try_send(msg.to_string())
             .expect("Inserting message failed!");
-    }
-
-    fn stop(&mut self) {
-        // TODO Maybe stop should actually be a custom drop?
-        // investigate kill_on_drop in Command.
-        eprintln!("terminating daemon");
-        let mut dproc = self.daemon.take().unwrap();
-        let mut recvproc = self.recvproc.take().unwrap();
-        tokio::spawn(async move {
-            dproc.kill().unwrap();
-            dproc
-                .status()
-                .await
-                .expect("failed to wait for daemon proc");
-
-            recvproc.kill().unwrap();
-            recvproc
-                .status()
-                .await
-                .expect("failed to wait for recvproc");
-            eprintln!("done terminating daemon");
-        });
     }
 }
 
