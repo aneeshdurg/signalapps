@@ -36,7 +36,7 @@ impl SignalCliDaemon {
             .kill_on_drop(true)
             .spawn()?;
 
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::channel(100);
 
         let recv_chan = rx;
         let send_chan = Arc::new(tx);
@@ -60,9 +60,7 @@ impl SignalCliDaemon {
                 let mut lines = BufReader::new(recvout).lines();
                 // TODO max size for line?
                 while let Some(Ok(line)) = lines.next().await {
-                    send_chan
-                        .try_send(line)
-                        .expect("Sending received msg failed!");
+                    send_chan.send(line).await.expect("Sending line failed!");
                 }
             });
         }
@@ -81,11 +79,13 @@ impl SignalCliDaemon {
     }
 }
 
+#[async_trait]
 impl Control for SignalCliDaemon {
-    fn insert_msg(&self, msg: &str) {
+    async fn insert_msg(&self, msg: &str) {
         self.send_chan
-            .try_send(msg.to_string())
-            .expect("Inserting message failed!");
+            .send(msg.to_string())
+            .await
+            .expect("Sending control msg failed!");
     }
 }
 

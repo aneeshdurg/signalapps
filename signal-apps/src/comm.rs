@@ -5,8 +5,9 @@ pub trait Receiver {
     async fn get_msg(&mut self) -> Option<String>;
 }
 
+#[async_trait]
 pub trait Control {
-    fn insert_msg(&self, msg: &str);
+    async fn insert_msg(&self, msg: &str);
 }
 
 pub trait Sender {

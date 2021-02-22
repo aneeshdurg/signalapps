@@ -7,9 +7,11 @@ use serde_json;
 use signal_hook::consts::signal::SIGINT;
 use signal_hook_tokio::Signals;
 
+mod appstate;
 mod comm;
 mod signalcli;
 
+use crate::appstate::AppState;
 use crate::comm::{Control, Receiver, Sender};
 use crate::signalcli::SignalCliDaemon;
 
@@ -24,14 +26,31 @@ fn get_msg(msg: &serde_json::Value) -> Option<(&str, &str)> {
     None
 }
 
-async fn main_loop<C, R, S>(control: C, mut recv: R, sender: S)
-where
-    C: Control,
-    R: Receiver,
-    S: Sender,
-{
+async fn signal_handler<C: Control>(control: C) {
     let signals = Signals::new(&[SIGINT]).unwrap();
     let handle = signals.handle();
+
+    let mut signals = signals.fuse();
+    eprintln!("Waiting for signals");
+    while let None = signals.next().await {}
+    eprintln!("Got exit signal");
+    handle.close();
+
+    control.insert_msg("").await;
+    eprintln!("sent sentinel");
+}
+
+async fn main_loop<C, R, S>(
+    control: C,
+    mut recv: R,
+    sender: S,
+    config: serde_json::Value,
+) where
+    C: Control,
+    R: Receiver,
+    S: Sender + Send + Sync,
+{
+    let (mut state, state_queue) = AppState::new(config, sender);
 
     let main_thread = async {
         println!("Setup main_thread");
@@ -49,25 +68,29 @@ where
                     .as_ref()
                     .map(get_msg)
             {
-                sender.send(source, msg);
+                let source = source.to_string();
+                let msg = msg.to_string();
+                state_queue
+                    .send((source, msg))
+                    .await
+                    .expect("enqueing task failed!");
             }
         }
+
+        // Notify the receiver that we have no more messages to send explicitly
+        drop(state_queue);
 
         eprintln!("Exiting main thread");
     };
 
-    let signal_thread = async {
-        let mut signals = signals.fuse();
-        eprintln!("Waiting for signals");
-        while let None = signals.next().await {}
-        eprintln!("Got exit signal");
-        handle.close();
-
-        control.insert_msg("");
-        eprintln!("sent sentinel");
+    let task_thread = async {
+        state.process_queue().await;
+        state.drain().await;
     };
 
-    join!(main_thread, signal_thread);
+    join!(main_thread, signal_handler(control), task_thread);
+    // TODO prevent drop of control until after the join completes.
+    //   We want to know that the daemon lives during state.drain.
 }
 
 #[tokio::main]
@@ -90,7 +113,7 @@ async fn main() -> Result<()> {
     eprintln!("Starting as user {:?}", user);
 
     let (control, recv, send) = SignalCliDaemon::new(user)?;
-    main_loop(control, recv, send).await;
+    main_loop(control, recv, send, config).await;
 
     Ok(())
 }
