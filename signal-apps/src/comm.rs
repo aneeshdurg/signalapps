@@ -5,8 +5,7 @@ pub trait Receiver {
     async fn get_msg(&mut self) -> Option<String>;
 }
 
-// TODO rename InternalSender to Control
-pub trait InternalSender {
+pub trait Control {
     fn insert_msg(&self, msg: &str);
     fn stop(&mut self);
 }

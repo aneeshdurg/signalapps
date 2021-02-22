@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures_lite::{io::BufReader, prelude::*};
 use tokio::sync::mpsc;
 
-use crate::comm::{InternalSender, Receiver, Sender};
+use crate::comm::{Control, Receiver, Sender};
 
 static SIGNALCLI_PATH: &str = "../signal-cli/build/install/signal-cli/bin/signal-cli";
 
@@ -81,7 +81,7 @@ impl SignalCliDaemon {
     }
 }
 
-impl InternalSender for SignalCliDaemon {
+impl Control for SignalCliDaemon {
     fn insert_msg(&self, msg: &str) {
         self.send_chan
             .try_send(msg.to_string())

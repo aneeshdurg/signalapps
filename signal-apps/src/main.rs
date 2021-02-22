@@ -9,31 +9,31 @@ use signal_hook_tokio::Signals;
 mod comm;
 mod signalcli;
 
-use crate::comm::{InternalSender, Receiver, Sender};
+use crate::comm::{Control, Receiver, Sender};
 use crate::signalcli::SignalCliDaemon;
 
-struct MainApp<R, S, IS>
+struct MainApp<C, R, S>
 where
+    C: Control,
     R: Receiver,
     S: Sender,
-    IS: InternalSender,
 {
+    control: C,
     recv: R,
     send: S,
-    control: IS,
 }
 
-impl<R, S, IS> MainApp<R, S, IS>
+impl<C, R, S> MainApp<C, R, S>
 where
+    C: Control,
     R: Receiver,
     S: Sender,
-    IS: InternalSender,
 {
-    fn new(recv: R, send: S, control: IS) -> Self {
+    fn new(control: C, recv: R, send: S) -> Self {
         MainApp {
+            control,
             recv,
             send,
-            control,
         }
     }
 
@@ -59,7 +59,7 @@ where
 
                 println!("begin send");
                 // TODO don't just send, read the message as json.
-                Sender::send(sender, "+15123006857", "hi");
+                sender.send("+15123006857", "hi");
                 println!("done send");
             }
 
@@ -77,7 +77,7 @@ where
             }
             handle.close();
             eprintln!("Got exit signal");
-            InternalSender::insert_msg(control, "");
+            control.insert_msg("");
             eprintln!("sent sentinel");
         };
 
@@ -105,6 +105,6 @@ async fn main() {
         .expect("config json needs a username key");
     eprintln!("Starting as user {:?}", user);
 
-    let (daemon, recv, send) = SignalCliDaemon::new(user);
-    MainApp::new(recv, send, daemon).main_loop().await;
+    let (control, recv, send) = SignalCliDaemon::new(user);
+    MainApp::new(control, recv, send).main_loop().await;
 }
