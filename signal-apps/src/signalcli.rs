@@ -1,15 +1,12 @@
-use std::fs::File;
 use std::str;
 use std::sync::Arc;
 
 use async_process::{Child, Command, Stdio};
 use async_trait::async_trait;
 use futures_lite::{io::BufReader, prelude::*};
-use subprocess::{Popen, PopenConfig, Redirection};
 use tokio::sync::mpsc;
 
-use crate::receiver::Receiver;
-use crate::sender::{InternalSender, Sender};
+use crate::comm::{InternalSender, Receiver, Sender};
 
 static SIGNALCLI_PATH: &str = "../signal-cli/build/install/signal-cli/bin/signal-cli";
 
@@ -22,7 +19,7 @@ pub struct SignalCliSender {
 }
 
 pub struct SignalCliDaemon {
-    daemon: Popen,
+    daemon: Option<Child>,
     recvproc: Option<Child>,
     send_chan: Arc<mpsc::Sender<String>>,
 }
@@ -30,15 +27,13 @@ pub struct SignalCliDaemon {
 impl SignalCliDaemon {
     pub fn new(user: &str) -> (Self, SignalCliReciever, SignalCliSender) {
         // TODO legit error handling
-        let devnull = File::create("/dev/null").unwrap();
-        let daemon = Popen::create(
-            &[SIGNALCLI_PATH, "daemon"],
-            PopenConfig {
-                stdout: Redirection::File(devnull),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let daemon = Some(
+            Command::new(SIGNALCLI_PATH)
+                .arg("daemon")
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
 
         let (tx, rx) = mpsc::channel(10);
 
@@ -73,9 +68,15 @@ impl SignalCliDaemon {
         }
 
         (
-            SignalCliDaemon { daemon, recvproc, send_chan },
+            SignalCliDaemon {
+                daemon,
+                recvproc,
+                send_chan,
+            },
             SignalCliReciever { recv_chan },
-            SignalCliSender { user: user.to_string() }
+            SignalCliSender {
+                user: user.to_string(),
+            },
         )
     }
 }
@@ -88,12 +89,18 @@ impl InternalSender for SignalCliDaemon {
     }
 
     fn stop(&mut self) {
+        // TODO Maybe stop should actually be a custom drop?
+        // investigate kill_on_drop in Command.
         eprintln!("terminating daemon");
-        self.daemon.terminate().unwrap();
-        self.daemon.wait().unwrap();
-
+        let mut dproc = self.daemon.take().unwrap();
         let mut recvproc = self.recvproc.take().unwrap();
         tokio::spawn(async move {
+            dproc.kill().unwrap();
+            dproc
+                .status()
+                .await
+                .expect("failed to wait for daemon proc");
+
             recvproc.kill().unwrap();
             recvproc
                 .status()
@@ -113,26 +120,18 @@ impl Receiver for SignalCliReciever {
 
 impl Sender for SignalCliSender {
     fn send(&self, dest: &str, msg: &str) {
+        let dest = dest.to_string();
+        let msg = msg.to_string();
+        let user = self.user.clone();
         eprintln!("Starting send proc");
-        Popen::create(
-            &[
-                SIGNALCLI_PATH,
-                "--dbus",
-                "-u",
-                &self.user,
-                "send",
-                "-m",
-                msg,
-                dest,
-            ],
-            PopenConfig {
-                stdout: Redirection::File(File::create("/dev/null").unwrap()),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .wait()
-        .expect("Send failed!");
-        eprintln!("Finished send proc");
+        tokio::spawn(async move {
+            Command::new(SIGNALCLI_PATH)
+                .args(&["--dbus", "-u", &user, "send", "-m", &msg, &dest])
+                .stdout(Stdio::null())
+                .output()
+                .await
+                .expect("Send failed!");
+            eprintln!("Finished send proc");
+        });
     }
 }

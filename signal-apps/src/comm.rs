@@ -1,3 +1,10 @@
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait Receiver {
+    async fn get_msg(&mut self) -> Option<String>;
+}
+
 // TODO rename InternalSender to Control
 pub trait InternalSender {
     fn insert_msg(&self, msg: &str);

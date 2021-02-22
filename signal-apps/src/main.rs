@@ -6,16 +6,17 @@ use serde_json;
 use signal_hook::consts::signal::SIGINT;
 use signal_hook_tokio::Signals;
 
-mod receiver;
-mod sender;
+mod comm;
 mod signalcli;
 
-use crate::receiver::Receiver;
-use crate::sender::{InternalSender, Sender};
+use crate::comm::{InternalSender, Receiver, Sender};
 use crate::signalcli::SignalCliDaemon;
 
 struct MainApp<R, S, IS>
-where R: Receiver, S: Sender, IS: InternalSender
+where
+    R: Receiver,
+    S: Sender,
+    IS: InternalSender,
 {
     recv: R,
     send: S,
@@ -23,10 +24,17 @@ where R: Receiver, S: Sender, IS: InternalSender
 }
 
 impl<R, S, IS> MainApp<R, S, IS>
-where R: Receiver, S: Sender, IS: InternalSender
+where
+    R: Receiver,
+    S: Sender,
+    IS: InternalSender,
 {
     fn new(recv: R, send: S, control: IS) -> Self {
-        MainApp { recv, send, control }
+        MainApp {
+            recv,
+            send,
+            control,
+        }
     }
 
     async fn main_loop(&mut self) {
@@ -51,11 +59,7 @@ where R: Receiver, S: Sender, IS: InternalSender
 
                 println!("begin send");
                 // TODO don't just send, read the message as json.
-                Sender::send(
-                    sender,
-                    "+15123006857",
-                    "hi"
-                );
+                Sender::send(sender, "+15123006857", "hi");
                 println!("done send");
             }
 
