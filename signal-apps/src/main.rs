@@ -48,15 +48,11 @@ where
             println!("Setup main_thread");
             loop {
                 let msg = recv.get_msg().await;
-                if let None = msg {
-                    break;
-                }
-                let msg = msg.unwrap();
-
+                let msg = match msg.as_ref().map(|x| x.as_str()) {
+                    None | Some("") => { break; }
+                    Some(msg) => msg
+                };
                 println!("got msg {:?}", msg);
-                if msg.len() == 0 {
-                    break;
-                }
 
                 println!("begin send");
                 // TODO don't just send, read the message as json.
@@ -70,14 +66,11 @@ where
         let control = &mut self.control;
         let signal_thread = async {
             let mut signals = signals.fuse();
-            loop {
-                eprintln!("Waiting for signals");
-                if let Some(_) = signals.next().await {
-                    break;
-                }
-            }
-            handle.close();
+            eprintln!("Waiting for signals");
+            while let None = signals.next().await { }
             eprintln!("Got exit signal");
+            handle.close();
+
             control.insert_msg("");
             eprintln!("sent sentinel");
         };

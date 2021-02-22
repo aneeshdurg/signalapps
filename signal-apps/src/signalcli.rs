@@ -128,7 +128,6 @@ impl Sender for SignalCliSender {
         tokio::spawn(async move {
             Command::new(SIGNALCLI_PATH)
                 .args(&["--dbus", "-u", &user, "send", "-m", &msg, &dest])
-                .stdout(Stdio::null())
                 .output()
                 .await
                 .expect("Send failed!");
