@@ -1,69 +1,89 @@
 use std::fs;
-use std::marker::{Send, Sync};
 
-use crossbeam_utils::thread;
 use clap::clap_app;
+use futures::{join, stream::StreamExt};
 use serde_json;
 use signal_hook::consts::signal::SIGINT;
-use signal_hook::iterator::Signals;
+use signal_hook_tokio::Signals;
 
 mod receiver;
 mod sender;
 mod signalcli;
 
 use crate::receiver::Receiver;
-use crate::sender::Sender;
+use crate::sender::{InternalSender, Sender};
 use crate::signalcli::SignalCliDaemon;
 
-struct MainApp<I> where I: Receiver + Sender + Send + Sync
+struct MainApp<R, S, IS>
+where R: Receiver, S: Sender, IS: InternalSender
 {
-    interface: I,
+    recv: R,
+    send: S,
+    control: IS,
 }
 
-impl<I> MainApp<I> where I: Receiver + Sender + Send + Sync
+impl<R, S, IS> MainApp<R, S, IS>
+where R: Receiver, S: Sender, IS: InternalSender
 {
-    fn new(interface: I) -> Self {
-        MainApp { interface }
+    fn new(recv: R, send: S, control: IS) -> Self {
+        MainApp { recv, send, control }
     }
 
-    fn main_loop(&mut self) {
-        let recv = &self.interface;
+    async fn main_loop(&mut self) {
+        let signals = Signals::new(&[SIGINT]).unwrap();
+        let handle = signals.handle();
 
-        thread::scope(|s| {
-            let mut signals = Signals::new(&[SIGINT]).unwrap();
-            let handle = signals.handle();
-
-            let main_thread = s.spawn(|_| {
-                loop {
-                    let msg = recv.get_msg();
-                    println!("got msg {:?}", msg);
-                    if msg.len() == 0 {
-                        eprintln!("Exiting main_thread");
-                        break;
-                    }
-                    // TODO don't just send, read the message as json.
-                    Sender::send(&self.interface, "+15123006857", "hi");
-                }
-            });
-
+        let recv = &mut self.recv;
+        let sender = &self.send;
+        let main_thread = async {
+            println!("Setup main_thread");
             loop {
-                match signals.wait().into_iter().next() {
-                    None => {},
-                    _ => { break; }
+                let msg = recv.get_msg().await;
+                if let None = msg {
+                    break;
+                }
+                let msg = msg.unwrap();
+
+                println!("got msg {:?}", msg);
+                if msg.len() == 0 {
+                    break;
+                }
+
+                println!("begin send");
+                // TODO don't just send, read the message as json.
+                Sender::send(
+                    sender,
+                    "+15123006857",
+                    "hi"
+                );
+                println!("done send");
+            }
+
+            eprintln!("Exiting main thread");
+        };
+
+        let control = &mut self.control;
+        let signal_thread = async {
+            let mut signals = signals.fuse();
+            loop {
+                eprintln!("Waiting for signals");
+                if let Some(_) = signals.next().await {
+                    break;
                 }
             }
             handle.close();
+            eprintln!("Got exit signal");
+            InternalSender::insert_msg(control, "");
+            eprintln!("sent sentinel");
+        };
 
-            Receiver::insert_msg(recv, "");
-            main_thread.join().expect("Thread failed to join.");
-        }).unwrap();
-
-        Receiver::stop(&mut self.interface);
+        join!(main_thread, signal_thread);
+        control.stop();
     }
 }
 
-
-fn main() {
+#[tokio::main]
+async fn main() {
     let matches = clap_app!(SignalApps =>
         (version: "0.0")
         (author: "Aneesh Durg <aneeshdurg17@gmail.com>")
@@ -76,9 +96,11 @@ fn main() {
     let config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(config).unwrap()).unwrap();
 
-    let user = config["username"].as_str().expect("config json needs a username key");
+    let user = config["username"]
+        .as_str()
+        .expect("config json needs a username key");
     eprintln!("Starting as user {:?}", user);
-    let daemon = SignalCliDaemon::new(user);
 
-    MainApp::new(daemon).main_loop();
+    let (daemon, recv, send) = SignalCliDaemon::new(user);
+    MainApp::new(recv, send, daemon).main_loop().await;
 }

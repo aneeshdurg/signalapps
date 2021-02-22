@@ -1,30 +1,34 @@
 use std::fs::File;
-use std::io::Read;
 use std::str;
-use std::sync::{Arc, Mutex};
-use std::thread::spawn;
+use std::sync::Arc;
 
-extern crate multiqueue;
+use async_process::{Child, Command, Stdio};
+use async_trait::async_trait;
+use futures_lite::{io::BufReader, prelude::*};
 use subprocess::{Popen, PopenConfig, Redirection};
+use tokio::sync::mpsc;
 
 use crate::receiver::Receiver;
-use crate::sender::Sender;
+use crate::sender::{InternalSender, Sender};
 
 static SIGNALCLI_PATH: &str = "../signal-cli/build/install/signal-cli/bin/signal-cli";
 
-// Max size of buffer for incoming messages
-const BUFFER_LEN: usize = 1024;
+pub struct SignalCliReciever {
+    recv_chan: mpsc::Receiver<String>,
+}
+
+pub struct SignalCliSender {
+    user: String,
+}
 
 pub struct SignalCliDaemon {
-    user: String,
     daemon: Popen,
-    recvproc: Arc<Mutex<Popen>>,
-    recv_chan: Mutex<multiqueue::MPMCReceiver<String>>,
-    send_chan: Arc<Mutex<multiqueue::MPMCSender<String>>>
+    recvproc: Option<Child>,
+    send_chan: Arc<mpsc::Sender<String>>,
 }
 
 impl SignalCliDaemon {
-    pub fn new(user: &str) -> Self {
+    pub fn new(user: &str) -> (Self, SignalCliReciever, SignalCliSender) {
         // TODO legit error handling
         let devnull = File::create("/dev/null").unwrap();
         let daemon = Popen::create(
@@ -36,99 +40,51 @@ impl SignalCliDaemon {
         )
         .unwrap();
 
-        let recvproc = Arc::new(Mutex::new(
-            Popen::create(
-                &[
-                    SIGNALCLI_PATH,
-                    "--dbus",
-                    "--output=json",
-                    "-u",
-                    user,
-                    "receive",
-                    "--timeout",
-                    "-1", /* disable timeout */
-                ],
-                PopenConfig {
-                    stdout: Redirection::Pipe,
-                    ..Default::default()
-                },
-            )
-            .unwrap(),
-        ));
+        let (tx, rx) = mpsc::channel(10);
 
-        let rproc = recvproc.clone();
-        let (tx, rx) = multiqueue::mpmc_queue(10);
+        let recv_chan = rx;
+        let send_chan = Arc::new(tx);
 
-        let send_chan = Arc::new(Mutex::new(tx));
-        let recv_chan = Mutex::new(rx);
+        let mut recvproc = Command::new(SIGNALCLI_PATH)
+            .arg("--dbus")
+            .arg("--output=json")
+            .arg("-u")
+            .arg(user)
+            .arg("receive")
+            .arg("--timeout")
+            .arg("-1") /* disable timeout */
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let recvout = recvproc.stdout.take().unwrap();
+        let recvproc = Some(recvproc);
 
-        let tx = send_chan.clone();
-        spawn(move || {
-            loop {
-                let mut msg = [0; BUFFER_LEN];
-                // read a line up to 1024 characters. if there are more characters in a line,
-                // discard the remainder.
-                let mut i = 0;
-                let mut error = false;
-                loop {
-                    let mut buffer = [0; 1];
-                    let read_res = {
-                        rproc
-                            .lock()
-                            .unwrap()
-                            .stdout
-                            .as_ref()
-                            .unwrap()
-                            .read(&mut buffer)
-                    };
-
-                    match read_res {
-                        Ok(1) => {
-                            if buffer[0] == ('\n' as u8) {
-                                break;
-                            } else {
-                                // we either need this byte in the message or we're discarding this
-                                // line.
-                                if i < BUFFER_LEN {
-                                    msg[i] = buffer[0];
-                                    i += 1;
-                                }
-                            }
-                        }
-                        _ => {
-                            error = true;
-                            break;
-                        }
-                    }
+        {
+            let send_chan = send_chan.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(recvout).lines();
+                // TODO max size for line?
+                while let Some(Ok(line)) = lines.next().await {
+                    send_chan
+                        .try_send(line)
+                        .expect("Sending received msg failed!");
                 }
-
-                if error {
-                    break;
-                }
-
-                let msg = String::from_utf8(msg[0..i].to_vec()).unwrap();
-                tx.lock().unwrap().try_send(msg).expect("Sending received msg failed!");
-            }
-        });
-
-        SignalCliDaemon {
-            user: user.to_string(),
-            daemon,
-            recvproc,
-            recv_chan,
-            send_chan,
+            });
         }
+
+        (
+            SignalCliDaemon { daemon, recvproc, send_chan },
+            SignalCliReciever { recv_chan },
+            SignalCliSender { user: user.to_string() }
+        )
     }
 }
 
-impl Receiver for SignalCliDaemon {
+impl InternalSender for SignalCliDaemon {
     fn insert_msg(&self, msg: &str) {
-        self.send_chan.lock().unwrap().try_send(msg.to_string())
+        self.send_chan
+            .try_send(msg.to_string())
             .expect("Inserting message failed!");
-    }
-
-    fn get_msg(&self) -> String {
-        self.recv_chan.lock().unwrap().recv().unwrap()
     }
 
     fn stop(&mut self) {
@@ -136,16 +92,28 @@ impl Receiver for SignalCliDaemon {
         self.daemon.terminate().unwrap();
         self.daemon.wait().unwrap();
 
-        self.recvproc.lock().unwrap().terminate().unwrap();
-        self.recvproc.lock().unwrap().wait().unwrap();
-        eprintln!("done terminating daemon");
+        let mut recvproc = self.recvproc.take().unwrap();
+        tokio::spawn(async move {
+            recvproc.kill().unwrap();
+            recvproc
+                .status()
+                .await
+                .expect("failed to wait for recvproc");
+            eprintln!("done terminating daemon");
+        });
     }
-
-
 }
 
-impl Sender for SignalCliDaemon {
+#[async_trait]
+impl Receiver for SignalCliReciever {
+    async fn get_msg(&mut self) -> Option<String> {
+        self.recv_chan.recv().await
+    }
+}
+
+impl Sender for SignalCliSender {
     fn send(&self, dest: &str, msg: &str) {
+        eprintln!("Starting send proc");
         Popen::create(
             &[
                 SIGNALCLI_PATH,
@@ -161,6 +129,10 @@ impl Sender for SignalCliDaemon {
                 stdout: Redirection::File(File::create("/dev/null").unwrap()),
                 ..Default::default()
             },
-        ).unwrap().wait().expect("Send failed!");
+        )
+        .unwrap()
+        .wait()
+        .expect("Send failed!");
+        eprintln!("Finished send proc");
     }
 }

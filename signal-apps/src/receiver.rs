@@ -1,5 +1,6 @@
+use async_trait::async_trait;
+
+#[async_trait]
 pub trait Receiver {
-    fn insert_msg(&self, msg: &str);
-    fn get_msg(&self) -> String;
-    fn stop(&mut self);
+    async fn get_msg(&mut self) -> Option<String>;
 }
