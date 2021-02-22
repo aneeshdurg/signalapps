@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Result;
 
 use clap::clap_app;
 use futures::{join, stream::StreamExt};
@@ -87,7 +88,7 @@ where
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     let matches = clap_app!(SignalApps =>
         (version: "0.0")
         (author: "Aneesh Durg <aneeshdurg17@gmail.com>")
@@ -98,7 +99,7 @@ async fn main() {
 
     let config = matches.value_of("CONFIG").unwrap();
     let config: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(config).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(config)?)?;
 
     let user = config["username"]
         .as_str()
@@ -107,4 +108,6 @@ async fn main() {
 
     let (control, recv, send) = SignalCliDaemon::new(user);
     MainApp::new(control, recv, send).main_loop().await;
+
+    Ok(())
 }

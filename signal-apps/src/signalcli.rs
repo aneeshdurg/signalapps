@@ -8,7 +8,8 @@ use tokio::sync::mpsc;
 
 use crate::comm::{Control, Receiver, Sender};
 
-static SIGNALCLI_PATH: &str = "../signal-cli/build/install/signal-cli/bin/signal-cli";
+static SIGNALCLI_PATH: &str =
+    "../signal-cli/build/install/signal-cli/bin/signal-cli";
 
 pub struct SignalCliReciever {
     recv_chan: mpsc::Receiver<String>,
