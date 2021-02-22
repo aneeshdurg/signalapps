@@ -715,6 +715,7 @@ dependencies = [
  "async-process",
  "async-std",
  "async-trait",
+ "bytes",
  "clap",
  "futures",
  "futures-lite",
