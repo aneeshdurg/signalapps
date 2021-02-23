@@ -1,0 +1,26 @@
+   Compiling signal-apps v0.1.0 (/home/aneesh/signal-apps/signal-apps-server)
+error[E0423]: expected function, found macro `eprintln`
+   --> src/appstate.rs:121:33
+    |
+121 | ...                   eprintln("l read {} bytes", n);
+    |                       ^^^^^^^^ not a function
+    |
+help: use `!` to invoke the macro
+    |
+121 |                                 eprintln!("l read {} bytes", n);
+    |                                         ^
+
+warning: unused import: `bytes::BufMut`
+ --> src/appstate.rs:5:5
+  |
+5 | use bytes::BufMut;
+  |     ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+error: aborting due to previous error; 1 warning emitted
+
+For more information about this error, try `rustc --explain E0423`.
+error: could not compile `signal-apps`.
+
+To learn more, run the command again with --verbose.

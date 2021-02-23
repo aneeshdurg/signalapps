@@ -11,7 +11,7 @@ mod appstate;
 mod comm;
 mod signalcli;
 
-use crate::appstate::AppState;
+use crate::appstate::{AppMsg, AppState};
 use crate::comm::{Control, Receiver, Sender};
 use crate::signalcli::SignalCliDaemon;
 
@@ -71,7 +71,7 @@ async fn main_loop<C, R, S>(
                 let source = source.to_string();
                 let msg = msg.to_string();
                 state_queue
-                    .send((source, msg))
+                    .send(AppMsg::InMsg(source, msg))
                     .await
                     .expect("enqueing task failed!");
             }
