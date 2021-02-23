@@ -82,6 +82,7 @@ async fn read_msg_from_stream(
 pub enum AppMsg {
     InMsg(String, String),
     OutMsg(String, String), // Allows access to sender
+    Finish,
 }
 
 struct App {
@@ -250,8 +251,12 @@ impl<S: Sender> AppState<S> {
                     self.run_action(source, msg).await
                 }
                 AppMsg::OutMsg(source, msg) => self.sender.send(&source, &msg),
+                AppMsg::Finish => {
+                    break;
+                }
             }
         }
+        eprintln!("done processing queue");
     }
 
     async fn open_app_socket(&self, name: &str) -> io::Result<UnixStream> {

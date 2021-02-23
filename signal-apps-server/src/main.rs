@@ -78,7 +78,10 @@ async fn main_loop<C, R, S>(
         }
 
         // Notify the receiver that we have no more messages to send explicitly
-        drop(state_queue);
+        state_queue
+            .send(AppMsg::Finish)
+            .await
+            .expect("enqueing task failed!");
 
         eprintln!("Exiting main thread");
     };
