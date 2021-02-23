@@ -33,11 +33,18 @@ async def client_connected_cb(reader, writer):
         print("got line:", line)
         if not line:
             break
-        line = line.decode()
 
-        response = line
-        if line == "?":
+        try:
+            line = json.loads(line)
+        except json.decoder.JSONDecodeError:
+            break
+
+        if line["type"] == "query":
             response = "A simple echo app"
+        elif line["type"] == "start":
+            response = "Started echo!"
+        else:
+            response = line["data"]
 
         response = json.dumps(
             Response({"type": "response", "value": response})
