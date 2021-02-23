@@ -91,11 +91,6 @@ struct App {
     control: mpsc::Sender<AppMsg>,
     tx: Option<Arc<Mutex<mpsc::Sender<String>>>>,
     writer: Option<WriteHalf<UnixStream>>,
-    // TODO take in a ref to AppState and create a way for async messages to be sent to the State,
-    // also need to take in a Sender (ref?) to send msgs to client directly.
-    //
-    // Maybe Sender should implement Clone?
-    //
     // TODO document protocol!
 }
 
@@ -166,30 +161,20 @@ impl App {
             .expect("Sending control msg failed!");
     }
 
+    async fn send_bytes(&mut self, bytes: &[u8]) -> bool {
+        if let Err(_) = self.writer.as_mut().unwrap().write_all(bytes).await {
+            self.cancel().await;
+            return false;
+        }
+        true
+    }
+
     async fn send(&mut self, msg: &str) {
         eprintln!("Sending msg {:?}", msg);
-        // TODO convert msg to json
-        if let Err(_) = self
-            .writer
-            .as_mut()
-            .unwrap()
-            .write_all(&(msg.len() as u32).to_be_bytes())
-            .await
-        {
-            self.cancel().await;
-            return;
-        }
 
-        if let Err(_) = self
-            .writer
-            .as_mut()
-            .unwrap()
-            .write_all(msg.as_bytes())
-            .await
-        {
-            self.cancel().await;
-            return;
-        }
+        // TODO convert msg to json
+        let _ = self.send_bytes(&(msg.len() as u32).to_be_bytes()).await
+            && self.send_bytes(msg.as_bytes()).await;
 
         eprintln!("Sent msg {:?}", msg);
     }
@@ -208,7 +193,7 @@ struct AppInfo {
 }
 
 pub struct AppState<S: Sender> {
-    config: serde_json::Value,
+    // config: serde_json::Value, this could allow querying config from apps
     app_dir: String, // TODO turn this into ref
     sender: S,
     running_apps: HashMap<String, App>,
@@ -230,7 +215,6 @@ impl<S: Sender> AppState<S> {
         let incoming = task_sender.clone();
         (
             AppState {
-                config,
                 app_dir,
                 sender,
                 running_apps: HashMap::new(),
@@ -273,87 +257,21 @@ impl<S: Sender> AppState<S> {
         eprintln!("Found app outside cache, opening socket");
         eprintln!("opened socket");
         let stream = self.open_app_socket(name).await?;
-        stream.writable().await.expect("Could not write to socket");
-        eprintln!("writable socket");
+        let (mut sr, mut sw) = split(stream);
 
         // write 1 char
-        let bytes = 1u32.to_be_bytes();
-        stream.try_write(&bytes).unwrap();
-        stream.try_write(&['?' as u8]).unwrap();
-
+        sw.write_all(&1u32.to_be_bytes()).await?;
+        sw.write_all(&['?' as u8]).await?;
         eprintln!("queried socket");
 
-        let mut length = [0u8, 0, 0, 0];
-        let mut read = 0;
-        let mut failed = false;
-        loop {
-            match stream.try_read(&mut length[read..]) {
-                Ok(0) => {
-                    failed = true;
-                    break;
+        if let Ok(desc) = read_msg_from_stream(&mut sr).await {
+            if let Ok(desc) = serde_json::from_str::<serde_json::Value>(&desc) {
+                if let Some(desc) = desc["value"].as_str() {
+                    let name = name.to_string();
+                    let ident = name.clone();
+                    let desc = desc.to_string();
+                    self.app_cache.insert(ident, AppInfo { name, desc });
                 }
-                Ok(n) => {
-                    eprintln!("l read {} bytes", n);
-                    read += n;
-                    if read == 4 {
-                        break;
-                    }
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(_) => {
-                    failed = true;
-                    break;
-                }
-            }
-        }
-        if failed {
-            return Err(io::Error::new(io::ErrorKind::Other, "Failed to read"));
-        }
-
-        let length = u32::from_be_bytes(length) as usize;
-        eprintln!("Expecting {} bytes", length);
-
-        let mut desc = vec![];
-        loop {
-            stream.readable().await.expect("Could not read from socket");
-            eprintln!("socket was readable!");
-
-            match stream.try_read_buf(&mut desc) {
-                Ok(0) => {
-                    failed = true;
-                    break;
-                }
-                Ok(n) => {
-                    eprintln!("read {} bytes", n);
-                    if desc.len() == length {
-                        break;
-                    }
-                    continue;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(_) => {
-                    failed = true;
-                    break;
-                }
-            }
-        }
-        if failed {
-            return Err(io::Error::new(io::ErrorKind::Other, "Failed to read"));
-        }
-
-        eprintln!("got response");
-
-        let desc = String::from_utf8(desc).unwrap_or("".to_owned());
-        if let Ok(desc) = serde_json::from_str::<serde_json::Value>(&desc) {
-            if let Some(desc) = desc["value"].as_str() {
-                let name = name.to_string();
-                let ident = name.clone();
-                let desc = desc.to_string();
-                self.app_cache.insert(ident, AppInfo { name, desc });
             }
         }
 
@@ -490,9 +408,5 @@ impl<S: Sender> AppState<S> {
     fn send_no_apps(&self, dest: &str) {
         self.sender
             .send(dest, "You have no running apps. Send `help` to learn more.");
-    }
-
-    pub async fn drain(&self) {
-        // TODO close all current apps
     }
 }

@@ -86,12 +86,7 @@ async fn main_loop<C, R, S>(
         eprintln!("Exiting main thread");
     };
 
-    let task_thread = async {
-        state.process_queue().await;
-        state.drain().await;
-    };
-
-    join!(main_thread, signal_handler(control), task_thread);
+    join!(main_thread, signal_handler(control), state.process_queue());
     // TODO prevent drop of control until after the join completes.
     //   We want to know that the daemon lives during state.drain.
 }
