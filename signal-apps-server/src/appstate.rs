@@ -179,6 +179,7 @@ impl<App: app::App, S: Sender> AppState<App, S> {
                 &source,
                 "Could not find app, please contact your admin if you believe this is in error."
             );
+            self.running_apps.remove(&source);
             return;
         }
 

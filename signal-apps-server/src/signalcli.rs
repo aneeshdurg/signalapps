@@ -1,6 +1,7 @@
 use std::io::Result;
 use std::str;
 use std::sync::Arc;
+use std::process;
 
 use async_process::{Child, Command, Stdio};
 use async_trait::async_trait;
@@ -60,6 +61,10 @@ impl SignalCliDaemon {
                 let mut lines = BufReader::new(recvout).lines();
                 // TODO max size for line?
                 while let Some(Ok(line)) = lines.next().await {
+                    if line.len() == 0 {
+                        // weird empty lines sometimes.
+                        continue;
+                    }
                     send_chan.send(line).await.expect("Sending line failed!");
                 }
             });
@@ -102,13 +107,10 @@ impl Sender for SignalCliSender {
         let msg = msg.to_string();
         let user = self.user.clone();
         eprintln!("Starting send proc");
-        tokio::spawn(async move {
-            Command::new(SIGNALCLI_PATH)
-                .args(&["--dbus", "-u", &user, "send", "-m", &msg, &dest])
-                .output()
-                .await
-                .expect("Send failed!");
-            eprintln!("Finished send proc");
-        });
+        process::Command::new(SIGNALCLI_PATH)
+            .args(&["--dbus", "-u", &user, "send", "-m", &msg, &dest])
+            .output()
+            .expect("Send failed!");
+        eprintln!("Finished send proc");
     }
 }

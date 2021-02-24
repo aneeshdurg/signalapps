@@ -1,14 +1,20 @@
+import argparse
+import json
+import os
 import random
 import re
+import signal
+import socket
+import struct
 import textwrap
+
+from abc import abstractmethod
+from pathlib import Path
 
 from enum import Enum
 from queue import Queue
 from threading import Thread
 from typing import Callable, Dict, List, Optional, Set, Type
-
-from app import App, AppServer
-from sender import NullSender, Sender
 
 
 class State(Enum):
@@ -176,19 +182,30 @@ class Lobby:
             self.gameid += 1
 
 
-class TicTacToe(App):
-    def __init__(
-        self,
-        server: AppServer,
-        source: str,
-        content: str,
-        sender: Sender,
-        terminate_cb: Callable[[], None]
-    ) -> None:
-        super().__init__(server, source, content, sender, terminate_cb)
+class Sender:
+    @abstractmethod
+    def send(self, msg: str) -> None:
+        ...
 
-        assert isinstance(self.server, TicTacToeServer)
-        self.lobby = self.server.lobby
+    @abstractmethod
+    def terminate(self, reason: Optional[str]) -> None:
+        ...
+
+class NullSender(Sender):
+    def send(self, msg: str) -> None:
+        pass
+
+    def terminate(self, reason: Optional[str]) -> None:
+        pass
+
+
+class TicTacToe:
+    def __init__(
+        self, lobby: Optional[Lobby], source: str, sender: Sender
+    ) -> None:
+        self.sender = sender
+        self.user = source
+        self.lobby = lobby
 
         self.state = State.MAINMENU
         self.opponent = None
@@ -200,19 +217,16 @@ class TicTacToe(App):
         self.idx = None
 
     def start(self) -> None:
-        self.sender.send(self.user, "Welcome to tic tac toe!")
+        self.sender.send("Welcome to tic tac toe!")
         self.send_mainmenu()
 
     def send_mainmenu(self) -> None:
         self.sender.send(
-            self.user,
             "Send (a) to join the lobby. Send (b) to play against a computer."
         )
 
     def send_lobby_msg(self):
-        self.sender.send(
-            self.user, "You are currently in the lobby. Send 'q' to exit"
-        )
+        self.sender.send("You are currently in the lobby. Send 'q' to exit")
 
     def send_help_msg(self):
         helpmsg = textwrap.dedent(
@@ -223,7 +237,7 @@ class TicTacToe(App):
                 f - forfeit and quit
         """
         )
-        self.sender.send(self.user, helpmsg)
+        self.sender.send(helpmsg)
 
     def recv(self, msg: str) -> None:
         if self.state == State.MAINMENU:
@@ -233,7 +247,7 @@ class TicTacToe(App):
                 self.send_lobby_msg()
             elif msg == 'b':
                 self.state = State.LOBBY
-                board = Board('COM', [self, TicTacToeCom(self.server)])
+                board = Board('COM', [self, TicTacToeCom()])
             else:
                 self.send_mainmenu()
         elif self.state == State.LOBBY:
@@ -265,7 +279,7 @@ class TicTacToe(App):
     def board_send(self, boardid: object, msg: str) -> None:
         if self.stopped or boardid != self.boardid:
             return
-        self.sender.send(self.user, msg)
+        self.sender.send(msg)
 
     def gameover(self) -> None:
         self.board = None
@@ -280,11 +294,8 @@ class TicTacToe(App):
             self.board.forfeit(self.idx)
 
 class TicTacToeCom(TicTacToe):
-    def __init__(self, server) -> None:
-        super().__init__(
-            server, "COM", "", NullSender(), lambda : None
-        )
-        self.board = None
+    def __init__(self) -> None:
+        super().__init__(None, "COM", NullSender())
 
     def setboard(self, board: Board, idx: int) -> None:
         self.board = board
@@ -307,16 +318,93 @@ class TicTacToeCom(TicTacToe):
         pass
 
 
-class TicTacToeServer(AppServer):
-    name = "TicTacToe"
+class TicTacToeServer:
+    name = "tictactoe"
     desc = "tic tac toe! Play alone or with others"
 
-    def __init__(self, lobby: Lobby) -> None:
-        self.lobby = lobby
+    def __init__(self) -> None:
+        self.lobby = Lobby()
         self.lobby.start()
-
-    def vend(self) -> Type[App]:
-        return TicTacToe
 
     def stop(self) -> None:
         self.lobby.stop()
+
+
+class SockSender(Sender):
+    def __init__(self, connection) -> None:
+        self.connection = connection
+
+    def send(self, msg: str) -> None:
+        response = json.dumps({"type": "response", "value": msg}).encode()
+        length = struct.pack("!i", len(response))
+        self.connection.sendall(length)
+        self.connection.sendall(response)
+
+    def terminate(self, reason: Optional[str]) -> None:
+        # TODO
+        pass
+
+def handle_conn(connection, appserver):
+    app = None
+    sender = SockSender(connection)
+    while True:
+        length = connection.recv(4)
+        length = struct.unpack("!i", length)[0]
+
+        msg = connection.recv(length)
+        print(msg)
+        try:
+            msg = json.loads(msg)
+        except json.decoder.JSONDecodeError:
+            break
+
+        if msg["type"] == "query":
+            sender.send(appserver.desc)
+        elif msg["type"] == "start":
+            app = TicTacToe(appserver.lobby, msg["user"], sender)
+            app.start()
+        else:
+            if not app:
+                connection.close()
+                break;
+            app.recv(msg["data"])
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('config', type=str, help='path to config json')
+    args = parser.parse_args()
+
+    with open(args.config) as f:
+        config = json.load(f)
+
+    appdir = Path(config["appdir"])
+    socketpath = appdir / Path('tictactoe')
+    print(socketpath)
+    # Make sure the socket does not already exist
+    try:
+        os.unlink(socketpath)
+    except OSError:
+        if os.path.exists(socketpath):
+            raise
+
+    appserver = TicTacToeServer()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(bytes(socketpath))
+    sock.listen(100)
+
+    def shutdown(*args):
+        appserver.stop()
+        sock.close()
+        # TODO Call app.stop() for all running apps and close all conns
+    signal.signal(signal.SIGINT, shutdown)
+
+
+    while True:
+        # TODO have a list of active apps so that we can cancel all the threads.
+        try:
+            connection, _ = sock.accept()
+        except OSError:
+            break
+        thread = Thread(target=handle_conn, args=(connection, appserver))
+        thread.daemon = True
+        thread.start()

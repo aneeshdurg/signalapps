@@ -62,7 +62,12 @@ async fn main_loop<App, C, R, S>(
         loop {
             let msg = recv.get_msg().await;
             let msg = match msg.as_ref().map(String::as_str) {
-                None | Some("") => {
+                None => {
+                    eprintln!("No further msgs");
+                    break;
+                }
+                Some("") => {
+                    eprintln!("got sentinel");
                     break;
                 }
                 Some(msg) => msg,
