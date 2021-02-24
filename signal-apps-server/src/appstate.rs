@@ -564,4 +564,56 @@ mod test {
             state.running_apps.get(SOURCE).unwrap().messages
         );
     }
+
+    #[tokio::test]
+    async fn test_currentapp_reflects_startapp() {
+        let tmp_dir = TempDir::new("apps").expect("create tempdir failed!");
+        let file_path = tmp_dir.path().join("app");
+        File::create(file_path).expect("create app failed!");
+
+        let (sender, mut sent) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": tmp_dir.path().to_str()
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+
+        let app_name = "app";
+        state.startapp(SOURCE.into(), app_name).await;
+        state.run_action(SOURCE.into(), "currentapp".into()).await;
+
+        let msg = sent.recv().await.expect("Found no sent messages");
+        assert_eq!(SOURCE, msg.0);
+        assert_eq!(app_name, msg.1);
+
+        // Check that there's no additional messages
+        drop(state);
+        assert_eq!(None, sent.recv().await);
+    }
+
+    #[tokio::test]
+    async fn test_input_forwarded_to_running_apps() {
+        let tmp_dir = TempDir::new("apps").expect("create tempdir failed!");
+        let file_path = tmp_dir.path().join("app");
+        File::create(file_path).expect("create app failed!");
+
+        let (sender, _) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": tmp_dir.path().to_str()
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+
+        state.startapp(SOURCE.into(), "app").await;
+
+        let msg = "hello world!";
+        state.run_action(SOURCE.into(), msg.into()).await;
+
+        let expected =
+            serde_json::json!({"type": "msg", "data": msg}).to_string();
+        assert_eq!(
+            expected,
+            state.running_apps.get(SOURCE).unwrap().messages[1]
+        );
+    }
 }

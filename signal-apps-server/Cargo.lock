@@ -771,6 +771,7 @@ dependencies = [
  "clap",
  "futures",
  "futures-lite",
+ "libc",
  "serde_json",
  "signal-hook",
  "signal-hook-tokio",

@@ -21,4 +21,5 @@ subprocess = "0.2.6"
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
+libc = "0.2.86"
 tempdir = "0.3.7"

@@ -42,18 +42,19 @@ async fn signal_handler<C: Control>(control: C) {
     eprintln!("sent sentinel");
 }
 
-async fn main_loop<C, R, S>(
+async fn main_loop<App, C, R, S>(
     control: C,
     mut recv: R,
     sender: S,
     config: serde_json::Value,
 ) where
+    App: app::App,
     C: Control,
     R: Receiver,
     S: Sender + Send + Sync,
 {
     let new_app = AppState::new(config, sender);
-    let mut state: AppState<UnixStreamApp, S> = new_app.0;
+    let mut state: AppState<App, _> = new_app.0;
     let state_queue = new_app.1;
 
     let main_thread = async {
@@ -115,7 +116,139 @@ async fn main() -> Result<()> {
     eprintln!("Starting as user {:?}", user);
 
     let (control, recv, send) = SignalCliDaemon::new(user)?;
-    main_loop(control, recv, send, config).await;
+    main_loop::<UnixStreamApp, _, _, _>(control, recv, send, config).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use std::fs::File;
+    use std::io;
+    use std::process;
+
+    use async_trait::async_trait;
+    use tempdir::TempDir;
+    use tokio::sync::mpsc;
+    use tokio::time::{sleep, Duration};
+
+    use super::*;
+
+    pub struct MockSender {
+        channel: mpsc::UnboundedSender<(String, String)>,
+    }
+
+    impl MockSender {
+        fn new() -> (Self, mpsc::UnboundedReceiver<(String, String)>) {
+            let (channel, recv) = mpsc::unbounded_channel();
+            (MockSender { channel }, recv)
+        }
+    }
+
+    impl Sender for MockSender {
+        fn send(&self, dest: &str, msg: &str) {
+            let sender = self.channel.clone();
+            sender.send((dest.to_string(), msg.to_string())).unwrap()
+        }
+    }
+
+    pub struct MockControl {
+        channel: mpsc::UnboundedSender<String>,
+    }
+
+    impl MockControl {
+        fn new(channel: mpsc::UnboundedSender<String>) -> Self {
+            MockControl { channel }
+        }
+    }
+
+    #[async_trait]
+    impl Control for MockControl {
+        async fn insert_msg(&self, msg: &str) {
+            self.channel.send(msg.into()).unwrap();
+        }
+    }
+
+    pub struct MockReceiver {
+        channel: mpsc::UnboundedReceiver<String>,
+    }
+
+    impl MockReceiver {
+        fn new() -> (Self, MockControl) {
+            let (send, channel) = mpsc::unbounded_channel();
+            (MockReceiver { channel }, MockControl::new(send))
+        }
+    }
+
+    #[async_trait]
+    impl Receiver for MockReceiver {
+        async fn get_msg(&mut self) -> Option<String> {
+            self.channel.recv().await
+        }
+    }
+
+    struct MockApp {
+        id: u64,
+        name: String,
+        messages: Vec<String>,
+    }
+
+    #[async_trait]
+    impl app::App for MockApp {
+        async fn get_description(_: &str, _: &str) -> io::Result<String> {
+            Ok("".into())
+        }
+
+        fn new(id: u64, name: &str, _: &str, _: mpsc::Sender<AppMsg>) -> Self {
+            MockApp {
+                id,
+                name: name.into(),
+                messages: vec![],
+            }
+        }
+
+        fn get_id(&self) -> u64 {
+            self.id
+        }
+
+        fn get_name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&mut self, _: &str, _: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn send(&mut self, msg: &str) {
+            self.messages.push(msg.into());
+        }
+
+        async fn stop(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn test_sigint_stops_during_running_app() {
+        let tmp_dir = TempDir::new("apps").expect("create tempdir failed!");
+        let file_path = tmp_dir.path().join("app");
+        File::create(file_path).expect("create app failed!");
+
+        let (recv, control) = MockReceiver::new();
+        let channel = control.channel.clone();
+
+        let t1 = async move {
+            let (send, _) = MockSender::new();
+            let config = serde_json::json!({
+                "appdir": tmp_dir.path().to_str()
+            });
+            main_loop::<MockApp, _, _, _>(control, recv, send, config).await;
+        };
+
+        let t2 = async {
+            channel.send("startapp app".into()).unwrap();
+            sleep(Duration::from_millis(250)).await;
+            unsafe { libc::kill(process::id() as i32, libc::SIGINT); }
+        };
+
+        join!(t1, t2);
+    }
 }
