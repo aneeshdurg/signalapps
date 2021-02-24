@@ -84,11 +84,13 @@ async fn read_msg_from_stream(
 #[derive(Debug)]
 pub enum AppMsg {
     InMsg(String, String),
+    EndMsg(String, u64), // ends the given appid
     OutMsg(String, String), // Allows access to sender
     Finish,
 }
 
 struct App {
+    id: u64,
     name: String,
     user: String,
     control: mpsc::Sender<AppMsg>,
@@ -98,17 +100,22 @@ struct App {
 }
 
 impl App {
-    fn new(name: &str, user: &str, control: mpsc::Sender<AppMsg>) -> Self {
+    fn new(id: u64, name: &str, user: &str, control: mpsc::Sender<AppMsg>) -> Self {
         let name = name.to_string();
         let user = user.to_string();
         // TODO using an enum placeholder instead of all these options and combine w/ start_stream
         App {
+            id,
             name,
             user,
             control,
             tx: None,
             writer: None,
         }
+    }
+
+    fn get_id(&self) -> u64 {
+        self.id
     }
 
     fn start_stream(&mut self, stream: UnixStream) {
@@ -121,8 +128,11 @@ impl App {
         self.writer = Some(sw);
 
         let canceler = Arc::new(Mutex::new(false));
+        let id = self.id;
 
         {
+            let user = self.user.clone();
+            let control = self.control.clone();
             let canceler = canceler.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -154,6 +164,10 @@ impl App {
                     }
                 }
                 eprintln!("Closed app response producer");
+                control
+                    .send(AppMsg::EndMsg(user, id))
+                    .await
+                    .expect("Sending control msg failed!");
             });
         }
 
@@ -172,7 +186,7 @@ impl App {
                             user.clone(),
                             msg["value"].as_str().unwrap_or("").to_string(),
                         ),
-                        _ => AppMsg::InMsg(user.clone(), "endapp".to_string()),
+                        _ => AppMsg::EndMsg(user.clone(), id),
                     };
                     control
                         .send(msg)
@@ -210,7 +224,9 @@ impl App {
 
     async fn stop(&mut self) {
         match self.tx.take() {
-            Some(tx) => tx.lock().await.send("".to_string()).await.unwrap(),
+            Some(tx) => {
+                let _ = tx.lock().await.send("".to_string()).await;
+            },
             None => {}
         }
     }
@@ -224,6 +240,7 @@ struct AppInfo {
 pub struct AppState<S: Sender> {
     // config: serde_json::Value, this could allow querying config from apps
     app_dir: String, // TODO turn this into ref
+    app_id: u64,
     sender: S,
     running_apps: HashMap<String, App>,
     app_cache: HashMap<String, AppInfo>,
@@ -245,6 +262,7 @@ impl<S: Sender> AppState<S> {
         (
             AppState {
                 app_dir,
+                app_id: 0,
                 sender,
                 running_apps: HashMap::new(),
                 app_cache: HashMap::new(),
@@ -263,6 +281,9 @@ impl<S: Sender> AppState<S> {
                 AppMsg::InMsg(source, msg) => {
                     self.run_action(source, msg).await
                 }
+                AppMsg::EndMsg(source, appid) => {
+                    self.endapp(&source, Some(appid)).await;
+                },
                 AppMsg::OutMsg(source, msg) => self.sender.send(&source, &msg),
                 AppMsg::Finish => {
                     break;
@@ -308,6 +329,12 @@ impl<S: Sender> AppState<S> {
         Ok(())
     }
 
+    fn get_id(&mut self) -> u64 {
+        let id = self.app_id;
+        self.app_id += 1;
+        id
+    }
+
     pub async fn run_action(&mut self, source: String, msg: String) {
         // TODO always send read receipt - that requires more info
         // Maybe eventually this method should take the json obj
@@ -335,9 +362,15 @@ impl<S: Sender> AppState<S> {
                         // from racing here.
                         {
                             let ident = source.clone();
+                            let id = self.get_id();
                             self.running_apps.insert(
                                 ident,
-                                App::new(app_name, &source, self.incoming.clone())
+                                App::new(
+                                    id,
+                                    app_name,
+                                    &source,
+                                    self.incoming.clone()
+                                )
                             );
                         }
 
@@ -414,15 +447,7 @@ impl<S: Sender> AppState<S> {
                 }
             }
             "endapp" => {
-                // If there's a running app, terminate it.
-                match self.running_apps.remove(&source) {
-                    None => self.send_no_apps(&source),
-                    Some(mut app) => {
-                        app.stop().await;
-                        self.running_apps.remove(&source);
-                        self.sender.send(&source, "Stopped app");
-                    }
-                }
+                self.endapp(&source, None).await;
             }
             "help" => {
                 self.send_help(&source);
@@ -439,6 +464,24 @@ impl<S: Sender> AppState<S> {
                         app.send(&msg).await
                     }
                 };
+            }
+        }
+    }
+
+    async fn endapp(&mut self, source: &str, appid: Option<u64>) {
+        // If there's a running app, terminate it.
+        if let Some(_) = appid {
+            let foundid = self.running_apps.get(source).map(|app| app.get_id());
+            if appid != foundid {
+                return;
+            }
+        }
+
+        match self.running_apps.remove(source) {
+            None => self.send_no_apps(source),
+            Some(mut app) => {
+                app.stop().await;
+                self.sender.send(source, "Stopped app");
             }
         }
     }
