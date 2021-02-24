@@ -34,7 +34,7 @@ pub struct AppState<App: app::App, S: Sender> {
 }
 
 impl<App: app::App, S: Sender> AppState<App, S> {
-    pub fn new (
+    pub fn new(
         config: serde_json::Value,
         sender: S,
     ) -> (Self, mpsc::Sender<AppMsg>) {

@@ -16,10 +16,7 @@ use crate::appstate::AppMsg;
 
 #[async_trait]
 pub trait App {
-    async fn get_description(
-        app_dir: &str,
-        name: &str,
-    ) -> io::Result<String>;
+    async fn get_description(app_dir: &str, name: &str) -> io::Result<String>;
 
     fn new(
         id: u64,
@@ -138,10 +135,7 @@ impl UnixStreamApp {
 
 #[async_trait]
 impl App for UnixStreamApp {
-    async fn get_description(
-        app_dir: &str,
-        name: &str,
-    ) -> io::Result<String> {
+    async fn get_description(app_dir: &str, name: &str) -> io::Result<String> {
         eprintln!("opened socket");
         let stream = Self::open_app_socket(app_dir, name).await?;
         let (mut sr, mut sw) = split(stream);
@@ -189,11 +183,7 @@ impl App for UnixStreamApp {
         &self.name
     }
 
-    async fn start(
-        &mut self,
-        app_dir: &str,
-        name: &str,
-    ) -> io::Result<()> {
+    async fn start(&mut self, app_dir: &str, name: &str) -> io::Result<()> {
         let stream = Self::open_app_socket(app_dir, name).await?;
         let (mut sr, sw) = split(stream);
 
