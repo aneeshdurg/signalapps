@@ -6,7 +6,7 @@ use futures::StreamExt;
 use serde_json;
 use tokio::sync::mpsc;
 
-use crate::app::App;
+use crate::app;
 use crate::comm::Sender;
 
 #[derive(Debug)]
@@ -22,18 +22,18 @@ struct AppInfo {
     desc: String,
 }
 
-pub struct AppState<A: App, S: Sender> {
+pub struct AppState<App: app::App, S: Sender> {
     // config: serde_json::Value, this could allow querying config from apps
     app_dir: String, // TODO turn this into ref
     app_id: u64,
     sender: S,
-    running_apps: HashMap<String, A>,
+    running_apps: HashMap<String, App>,
     app_cache: HashMap<String, AppInfo>,
     task_receiver: mpsc::Receiver<AppMsg>,
     incoming: mpsc::Sender<AppMsg>,
 }
 
-impl<A: App, S: Sender> AppState<A, S> {
+impl<App: app::App, S: Sender> AppState<App, S> {
     pub fn new (
         config: serde_json::Value,
         sender: S,
@@ -85,7 +85,7 @@ impl<A: App, S: Sender> AppState<A, S> {
         }
 
         eprintln!("Found app outside cache, opening socket");
-        let desc = A::get_description(&self.app_dir, name).await?;
+        let desc = App::get_description(&self.app_dir, name).await?;
         self.app_cache.insert(
             name.to_string(),
             AppInfo {
@@ -170,7 +170,7 @@ impl<A: App, S: Sender> AppState<A, S> {
             // TODO use an enum placeholder instead of all these options and combine new w/ start
             self.running_apps.insert(
                 ident,
-                A::new(id, app_name, &source, self.incoming.clone()),
+                App::new(id, app_name, &source, self.incoming.clone()),
             );
         }
 
