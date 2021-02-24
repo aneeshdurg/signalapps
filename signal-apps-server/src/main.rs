@@ -12,6 +12,7 @@ mod appstate;
 mod comm;
 mod signalcli;
 
+use crate::app::UnixStreamApp;
 use crate::appstate::{AppMsg, AppState};
 use crate::comm::{Control, Receiver, Sender};
 use crate::signalcli::SignalCliDaemon;
@@ -51,7 +52,9 @@ async fn main_loop<C, R, S>(
     R: Receiver,
     S: Sender + Send + Sync,
 {
-    let (mut state, state_queue) = AppState::new(config, sender);
+    let new_app = AppState::new(config, sender);
+    let mut state: AppState<UnixStreamApp, S> = new_app.0;
+    let state_queue = new_app.1;
 
     let main_thread = async {
         println!("Setup main_thread");

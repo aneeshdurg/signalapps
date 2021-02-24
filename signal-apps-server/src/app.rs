@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::pin_mut;
 use serde_json;
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -79,17 +80,41 @@ async fn read_msg_from_stream(
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid utf-8"))
 }
 
-pub struct App {
+#[async_trait]
+pub trait App {
+    async fn get_description(
+        app_dir: &str,
+        name: &str,
+    ) -> io::Result<String>;
+
+    fn new(
+        id: u64,
+        name: &str,
+        user: &str,
+        control: mpsc::Sender<AppMsg>,
+    ) -> Self;
+
+    fn get_id(&self) -> u64;
+
+    fn get_name(&self) -> &str;
+
+    async fn start(&mut self, app_dir: &str, name: &str) -> io::Result<()>;
+
+    async fn send(&mut self, msg: &str);
+
+    async fn stop(&mut self);
+}
+
+pub struct UnixStreamApp {
     id: u64,
     name: String,
     user: String,
     control: mpsc::Sender<AppMsg>,
     tx: Option<Arc<Mutex<mpsc::Sender<String>>>>,
     writer: Option<WriteHalf<UnixStream>>,
-    // TODO document protocol!
 }
 
-impl App {
+impl UnixStreamApp {
     async fn open_app_socket(
         app_dir: &str,
         name: &str,
@@ -98,7 +123,22 @@ impl App {
         Ok(UnixStream::connect(path).await?)
     }
 
-    pub async fn get_description(
+    async fn send_bytes(&mut self, bytes: &[u8]) -> bool {
+        if let Err(_) = self.writer.as_mut().unwrap().write_all(bytes).await {
+            self.control
+                .send(AppMsg::EndMsg(self.user.clone(), self.id))
+                .await
+                .expect("Sending control msg failed!");
+
+            return false;
+        }
+        true
+    }
+}
+
+#[async_trait]
+impl App for UnixStreamApp {
+    async fn get_description(
         app_dir: &str,
         name: &str,
     ) -> io::Result<String> {
@@ -123,7 +163,7 @@ impl App {
         Ok("".into())
     }
 
-    pub fn new(
+    fn new(
         id: u64,
         name: &str,
         user: &str,
@@ -131,8 +171,7 @@ impl App {
     ) -> Self {
         let name = name.into();
         let user = user.into();
-        // TODO using an enum placeholder instead of all these options and combine w/ start_stream
-        App {
+        UnixStreamApp {
             id,
             name,
             user,
@@ -142,15 +181,15 @@ impl App {
         }
     }
 
-    pub fn get_id(&self) -> u64 {
+    fn get_id(&self) -> u64 {
         self.id
     }
 
-    pub fn get_name(&self) -> &str {
+    fn get_name(&self) -> &str {
         &self.name
     }
 
-    pub async fn start_stream(
+    async fn start(
         &mut self,
         app_dir: &str,
         name: &str,
@@ -242,26 +281,14 @@ impl App {
         Ok(())
     }
 
-    async fn send_bytes(&mut self, bytes: &[u8]) -> bool {
-        if let Err(_) = self.writer.as_mut().unwrap().write_all(bytes).await {
-            self.control
-                .send(AppMsg::EndMsg(self.user.clone(), self.id))
-                .await
-                .expect("Sending control msg failed!");
-
-            return false;
-        }
-        true
-    }
-
-    pub async fn send(&mut self, msg: &str) {
+    async fn send(&mut self, msg: &str) {
         eprintln!("Sending msg {:?}", msg);
         let _ = self.send_bytes(&(msg.len() as u32).to_be_bytes()).await
             && self.send_bytes(msg.as_bytes()).await;
         eprintln!("Sent msg {:?}", msg);
     }
 
-    pub async fn stop(&mut self) {
+    async fn stop(&mut self) {
         match self.tx.take() {
             Some(tx) => {
                 let _ = tx.lock().await.send("".into()).await;

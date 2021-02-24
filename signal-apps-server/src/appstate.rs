@@ -22,19 +22,19 @@ struct AppInfo {
     desc: String,
 }
 
-pub struct AppState<S: Sender> {
+pub struct AppState<A: App, S: Sender> {
     // config: serde_json::Value, this could allow querying config from apps
     app_dir: String, // TODO turn this into ref
     app_id: u64,
     sender: S,
-    running_apps: HashMap<String, App>,
+    running_apps: HashMap<String, A>,
     app_cache: HashMap<String, AppInfo>,
     task_receiver: mpsc::Receiver<AppMsg>,
     incoming: mpsc::Sender<AppMsg>,
 }
 
-impl<S: Sender> AppState<S> {
-    pub fn new(
+impl<A: App, S: Sender> AppState<A, S> {
+    pub fn new (
         config: serde_json::Value,
         sender: S,
     ) -> (Self, mpsc::Sender<AppMsg>) {
@@ -85,7 +85,7 @@ impl<S: Sender> AppState<S> {
         }
 
         eprintln!("Found app outside cache, opening socket");
-        let desc = App::get_description(&self.app_dir, name).await?;
+        let desc = A::get_description(&self.app_dir, name).await?;
         self.app_cache.insert(
             name.to_string(),
             AppInfo {
@@ -167,9 +167,10 @@ impl<S: Sender> AppState<S> {
         {
             let ident = source.clone();
             let id = self.get_id();
+            // TODO use an enum placeholder instead of all these options and combine new w/ start
             self.running_apps.insert(
                 ident,
-                App::new(id, app_name, &source, self.incoming.clone()),
+                A::new(id, app_name, &source, self.incoming.clone()),
             );
         }
 
@@ -184,7 +185,7 @@ impl<S: Sender> AppState<S> {
         // The app might have been removed by endapp during the appinfo fetch
         // above.
         if let Some(mut app) = self.running_apps.remove(&source) {
-            if let Err(_) = app.start_stream(&self.app_dir, app_name).await {
+            if let Err(_) = app.start(&self.app_dir, app_name).await {
                 self.sender.send(
                     &source,
                     "Could not start app, please notify your admin.",
