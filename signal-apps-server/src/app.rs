@@ -14,72 +14,6 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::appstate::AppMsg;
 
-async fn read_msg_from_stream(
-    stream: &mut ReadHalf<UnixStream>,
-) -> io::Result<String> {
-    let mut length = [0u8, 0, 0, 0];
-    let mut read = 0;
-    let mut failed = false;
-    loop {
-        match stream.read(&mut length[read..]).await {
-            Ok(0) => {
-                failed = true;
-                break;
-            }
-            Ok(n) => {
-                eprintln!("l read {} bytes", n);
-                read += n;
-                if read == 4 {
-                    break;
-                }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(_) => {
-                failed = true;
-                break;
-            }
-        }
-    }
-    if failed {
-        return Err(io::Error::new(io::ErrorKind::Other, "Failed to read"));
-    }
-
-    let length = u32::from_be_bytes(length) as usize;
-    eprintln!("Expecting {} bytes", length);
-
-    let mut content = Vec::with_capacity(length);
-    loop {
-        match stream.read_buf(&mut content).await {
-            Ok(0) => {
-                failed = true;
-                break;
-            }
-            Ok(n) => {
-                eprintln!("read {} bytes", n);
-                if content.len() == length {
-                    break;
-                }
-                continue;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(_) => {
-                failed = true;
-                break;
-            }
-        }
-    }
-    if failed {
-        return Err(io::Error::new(io::ErrorKind::Other, "Failed to read"));
-    }
-
-    String::from_utf8(content)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid utf-8"))
-}
-
 #[async_trait]
 pub trait App {
     async fn get_description(
@@ -115,6 +49,72 @@ pub struct UnixStreamApp {
 }
 
 impl UnixStreamApp {
+    async fn read_msg_from_stream(
+        stream: &mut ReadHalf<UnixStream>,
+    ) -> io::Result<String> {
+        let mut length = [0u8, 0, 0, 0];
+        let mut read = 0;
+        let mut failed = false;
+        loop {
+            match stream.read(&mut length[read..]).await {
+                Ok(0) => {
+                    failed = true;
+                    break;
+                }
+                Ok(n) => {
+                    eprintln!("l read {} bytes", n);
+                    read += n;
+                    if read == 4 {
+                        break;
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            return Err(io::Error::new(io::ErrorKind::Other, "Failed to read"));
+        }
+
+        let length = u32::from_be_bytes(length) as usize;
+        eprintln!("Expecting {} bytes", length);
+
+        let mut content = Vec::with_capacity(length);
+        loop {
+            match stream.read_buf(&mut content).await {
+                Ok(0) => {
+                    failed = true;
+                    break;
+                }
+                Ok(n) => {
+                    eprintln!("read {} bytes", n);
+                    if content.len() == length {
+                        break;
+                    }
+                    continue;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            return Err(io::Error::new(io::ErrorKind::Other, "Failed to read"));
+        }
+
+        String::from_utf8(content)
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid utf-8"))
+    }
+
     async fn open_app_socket(
         app_dir: &str,
         name: &str,
@@ -152,7 +152,7 @@ impl App for UnixStreamApp {
         sw.write_all(query.as_bytes()).await?;
         eprintln!("queried socket");
 
-        if let Ok(desc) = read_msg_from_stream(&mut sr).await {
+        if let Ok(desc) = Self::read_msg_from_stream(&mut sr).await {
             if let Ok(desc) = serde_json::from_str::<serde_json::Value>(&desc) {
                 if let Some(desc) = desc["value"].as_str() {
                     return Ok(desc.into());
@@ -214,7 +214,7 @@ impl App for UnixStreamApp {
             tokio::spawn(async move {
                 while let Ok(content) = loop {
                     // Read, pausing every 500ms to check if we should cancel instead
-                    let reader = read_msg_from_stream(&mut sr);
+                    let reader = Self::read_msg_from_stream(&mut sr);
                     pin_mut!(reader);
                     break loop {
                         match tokio::time::timeout(
