@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::io;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use std::ops::Deref;
-use std::ops::DerefMut;
 
 use async_std::fs;
 use futures::{pin_mut, StreamExt};
@@ -84,7 +84,7 @@ async fn read_msg_from_stream(
 #[derive(Debug)]
 pub enum AppMsg {
     InMsg(String, String),
-    EndMsg(String, u64), // ends the given appid
+    EndMsg(String, u64),    // ends the given appid
     OutMsg(String, String), // Allows access to sender
     Finish,
 }
@@ -100,9 +100,14 @@ struct App {
 }
 
 impl App {
-    fn new(id: u64, name: &str, user: &str, control: mpsc::Sender<AppMsg>) -> Self {
-        let name = name.to_string();
-        let user = user.to_string();
+    fn new(
+        id: u64,
+        name: &str,
+        user: &str,
+        control: mpsc::Sender<AppMsg>,
+    ) -> Self {
+        let name = name.into();
+        let user = user.into();
         // TODO using an enum placeholder instead of all these options and combine w/ start_stream
         App {
             id,
@@ -152,7 +157,10 @@ impl App {
                             }
                             Err(_) => {
                                 if *canceler.lock().await.deref() {
-                                    break Err(io::Error::new(io::ErrorKind::Other, "Cancelling producer"));
+                                    break Err(io::Error::new(
+                                        io::ErrorKind::Other,
+                                        "Cancelling producer",
+                                    ));
                                 }
                                 continue;
                             }
@@ -184,7 +192,7 @@ impl App {
                     let msg = match msg["type"].as_str() {
                         Some("response") => AppMsg::OutMsg(
                             user.clone(),
-                            msg["value"].as_str().unwrap_or("").to_string(),
+                            msg["value"].as_str().unwrap_or("").into(),
                         ),
                         _ => AppMsg::EndMsg(user.clone(), id),
                     };
@@ -202,7 +210,7 @@ impl App {
 
     async fn cancel(&mut self) {
         self.control
-            .send(AppMsg::InMsg(self.user.clone(), "endapp".to_string()))
+            .send(AppMsg::InMsg(self.user.clone(), "endapp".into()))
             .await
             .expect("Sending control msg failed!");
     }
@@ -225,8 +233,8 @@ impl App {
     async fn stop(&mut self) {
         match self.tx.take() {
             Some(tx) => {
-                let _ = tx.lock().await.send("".to_string()).await;
-            },
+                let _ = tx.lock().await.send("".into()).await;
+            }
             None => {}
         }
     }
@@ -256,7 +264,7 @@ impl<S: Sender> AppState<S> {
         let app_dir = config["appdir"]
             .as_str()
             .expect("Config is missing appdir")
-            .to_string();
+            .into();
         let (task_sender, task_receiver) = mpsc::channel(100);
         let incoming = task_sender.clone();
         (
@@ -283,7 +291,7 @@ impl<S: Sender> AppState<S> {
                 }
                 AppMsg::EndMsg(source, appid) => {
                     self.endapp(&source, Some(appid)).await;
-                },
+                }
                 AppMsg::OutMsg(source, msg) => self.sender.send(&source, &msg),
                 AppMsg::Finish => {
                     break;
@@ -320,7 +328,7 @@ impl<S: Sender> AppState<S> {
                 if let Some(desc) = desc["value"].as_str() {
                     let name = name.to_string();
                     let ident = name.clone();
-                    let desc = desc.to_string();
+                    let desc = desc.into();
                     self.app_cache.insert(ident, AppInfo { name, desc });
                 }
             }
@@ -358,86 +366,12 @@ impl<S: Sender> AppState<S> {
                         }
 
                         let app_name = cmd[1];
-                        // We're about to yield so make sure we insert first to prevent other tasks
-                        // from racing here.
-                        {
-                            let ident = source.clone();
-                            let id = self.get_id();
-                            self.running_apps.insert(
-                                ident,
-                                App::new(
-                                    id,
-                                    app_name,
-                                    &source,
-                                    self.incoming.clone()
-                                )
-                            );
-                        }
-
-                        if let Err(_) =  self.populate_app_cache(app_name).await {
-                            self.sender.send(
-                                &source,
-                                "Could not find app, please contact your admin if you believe this is in error."
-                            );
-                            return;
-                        }
-
-                        // The app might have been removed by endapp during the appinfo fetch
-                        // above.
-                        if let Some(mut app) = self.running_apps.remove(&source) {
-                            match self.open_app_socket(app_name).await {
-                                Ok(stream) => {
-                                    app.start_stream(stream);
-                                    let start_msg = serde_json::json!({
-                                        "type": "start",
-                                        "user": &source,
-                                    }).to_string();
-                                    app.send(&start_msg).await;
-                                    self.running_apps.insert(source, app);
-                                },
-                                Err(_) => {
-                                    self.sender.send(
-                                        &source,
-                                        "Could not start app, please notify your admin."
-                                    );
-                                }
-                            }
-                        }
+                        self.startapp(source ,app_name).await;
                     },
                 }
             }
             "listapps" => {
-                // List all installed apps.
-                // Do a listdir on the directory containing apps
-                // for a known app, check the cache, otherwise populate it
-                eprintln!("Reading appdir");
-                let mut entries = fs::read_dir(&self.app_dir)
-                    .await
-                    .expect("Failed to read app_dir!");
-                while let Some(entry) = entries.next().await {
-                    let entry = entry.expect("Failed to read app_dir!");
-                    let name = entry.file_name();
-                    // Ignore any errors here
-                    let _ = self
-                        .populate_app_cache(
-                            name.to_str().expect("Invalid utf8 name"),
-                        )
-                        .await;
-                }
-
-                eprintln!("building resp");
-                let mut lines = vec![
-                    "You currently have the following apps installed."
-                        .to_string(),
-                    "To install more, please contact your admin.".to_string(),
-                ];
-                for info in self.app_cache.values() {
-                    lines.push(format!("{:?} - {:?}\n", info.name, info.desc));
-                }
-                // TODO cache this?
-                let infostr = lines.join("\n");
-                eprintln!("sent resp");
-                self.sender.send(&source, &infostr);
+                self.listapps(&source).await;
             }
             "currentapp" => {
                 // If there's a running app return it's name
@@ -466,6 +400,83 @@ impl<S: Sender> AppState<S> {
                 };
             }
         }
+    }
+
+    async fn startapp(&mut self, source: String, app_name: &str) {
+        // We're about to yield so make sure we insert first to prevent other tasks
+        // from racing here.
+        {
+            let ident = source.clone();
+            let id = self.get_id();
+            self.running_apps.insert(
+                ident,
+                App::new(id, app_name, &source, self.incoming.clone()),
+            );
+        }
+
+        if let Err(_) = self.populate_app_cache(app_name).await {
+            self.sender.send(
+                &source,
+                "Could not find app, please contact your admin if you believe this is in error."
+            );
+            return;
+        }
+
+        // The app might have been removed by endapp during the appinfo fetch
+        // above.
+        if let Some(mut app) = self.running_apps.remove(&source) {
+            match self.open_app_socket(app_name).await {
+                Ok(stream) => {
+                    app.start_stream(stream);
+                    let start_msg = serde_json::json!({
+                        "type": "start",
+                        "user": &source,
+                    })
+                    .to_string();
+                    app.send(&start_msg).await;
+                    self.running_apps.insert(source, app);
+                }
+                Err(_) => {
+                    self.sender.send(
+                        &source,
+                        "Could not start app, please notify your admin.",
+                    );
+
+                    // TODO remove it from app_cache
+                }
+            }
+        }
+    }
+
+    async fn listapps(&mut self, source: &str) {
+        // List all installed apps.
+        // Do a listdir on the directory containing apps
+        // for a known app, check the cache, otherwise populate it
+        eprintln!("Reading appdir");
+        let mut entries = fs::read_dir(&self.app_dir)
+            .await
+            .expect("Failed to read app_dir!");
+        while let Some(entry) = entries.next().await {
+            let entry = entry.expect("Failed to read app_dir!");
+            let name = entry.file_name();
+            // Ignore any errors here
+            let _ = self
+                .populate_app_cache(name.to_str().expect("Invalid utf8 name"))
+                .await;
+        }
+
+        eprintln!("building resp");
+        let mut lines = vec![
+            "You currently have the following apps installed.".into(),
+            "To install more, please contact your admin.".into(),
+        ];
+        for info in self.app_cache.values() {
+            lines.push(format!("{:?} - {:?}\n", info.name, info.desc));
+        }
+        // TODO cache this?
+        let infostr = lines.join("\n");
+        eprintln!("sent resp");
+        self.sender.send(&source, &infostr);
     }
 
     async fn endapp(&mut self, source: &str, appid: Option<u64>) {
