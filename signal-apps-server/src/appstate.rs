@@ -226,8 +226,12 @@ impl<App: app::App, S: Sender> AppState<App, S> {
             "You currently have the following apps installed.".into(),
             "To install more, please contact your admin.".into(),
         ];
-        for info in self.app_cache.values() {
-            lines.push(format!("{:?} - {:?}\n", info.name, info.desc));
+
+        let mut apps: Vec<_> = self.app_cache.keys().into_iter().collect();
+        apps.sort();
+        for app in apps {
+            let info = self.app_cache.get(app).unwrap();
+            lines.push(format!("{} - {}", info.name, info.desc));
         }
         // TODO cache this?
         let infostr = lines.join("\n");
@@ -266,28 +270,30 @@ impl<App: app::App, S: Sender> AppState<App, S> {
 
 #[cfg(test)]
 mod test {
+    use std::cell::RefCell;
+    use std::fs::File;
+
     use async_trait::async_trait;
+    use tempdir::TempDir;
 
     use super::*;
 
+    const SOURCE: &'static str = "+15555555";
+
     pub struct MockSender {
-        channel: (
-            mpsc::UnboundedSender<(String, String)>,
-            mpsc::UnboundedReceiver<(String, String)>,
-        ),
+        channel: mpsc::UnboundedSender<(String, String)>,
     }
 
     impl MockSender {
-        fn new() -> Self {
-            MockSender {
-                channel: mpsc::unbounded_channel(),
-            }
+        fn new() -> (Self, mpsc::UnboundedReceiver<(String, String)>) {
+            let (channel, recv) = mpsc::unbounded_channel();
+            (MockSender { channel }, recv)
         }
     }
 
     impl Sender for MockSender {
         fn send(&self, dest: &str, msg: &str) {
-            let sender = self.channel.0.clone();
+            let sender = self.channel.clone();
             sender.send((dest.to_string(), msg.to_string())).unwrap()
         }
     }
@@ -295,15 +301,21 @@ mod test {
     struct MockApp {
         id: u64,
         name: String,
+        messages: Vec<String>,
     }
+
+    thread_local!(static DESCRIPTIONQUERIES: RefCell<usize> = RefCell::new(0));
 
     #[async_trait]
     impl app::App for MockApp {
         async fn get_description(
             _app_dir: &str,
-            _name: &str,
+            name: &str,
         ) -> io::Result<String> {
-            Ok("mockapp".into())
+            DESCRIPTIONQUERIES.with(|d| {
+                *d.borrow_mut() += 1;
+            });
+            Ok(format!("mockapp {}", name).into())
         }
 
         fn new(
@@ -315,6 +327,7 @@ mod test {
             MockApp {
                 id,
                 name: name.into(),
+                messages: vec![],
             }
         }
 
@@ -334,15 +347,16 @@ mod test {
             Ok(())
         }
 
-        async fn send(&mut self, _msg: &str) {}
+        async fn send(&mut self, msg: &str) {
+            self.messages.push(msg.into());
+        }
 
         async fn stop(&mut self) {}
     }
 
     #[tokio::test]
     async fn test_finish() {
-        let sender = MockSender::new();
-        // TODO make tempdir
+        let (sender, _) = MockSender::new();
         let config = serde_json::json!({
             "appdir": "/tmp/test"
         });
@@ -355,5 +369,199 @@ mod test {
             .expect("Failed to send finish");
         // This should exit immediately
         state.process_queue().await;
+    }
+
+    #[tokio::test]
+    async fn test_currentapp_noapp() {
+        let (sender, mut sent) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": "/tmp/test"
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+
+        state.run_action(SOURCE.into(), "currentapp".into()).await;
+
+        let msg = sent.recv().await.expect("Found no sent messages");
+        assert_eq!(SOURCE, msg.0);
+        assert_eq!(
+            "You have no running apps. Send `help` to learn more.",
+            msg.1
+        );
+
+        // Check that there's no additional messages
+        drop(state);
+        assert_eq!(None, sent.recv().await);
+    }
+
+    #[tokio::test]
+    async fn test_endapp_noapp() {
+        let (sender, mut sent) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": "/tmp/test"
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+
+        state.endapp(SOURCE, None).await;
+        let msg = sent.recv().await.expect("Found no sent messages");
+        assert_eq!(SOURCE, msg.0);
+        assert_eq!(
+            "You have no running apps. Send `help` to learn more.",
+            msg.1
+        );
+
+        // This variant should be internal only, so we expect no output
+        state.endapp(SOURCE, Some(1)).await;
+        drop(state);
+        assert_eq!(None, sent.recv().await);
+    }
+
+    #[tokio::test]
+    async fn test_listapps_empty() {
+        let tmp_dir = TempDir::new("apps").expect("create tempdir failed!");
+        let (sender, mut sent) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": tmp_dir.path().to_str()
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+        state.listapps(SOURCE).await;
+
+        let msg = sent.recv().await.expect("Found no sent messages");
+        let expected: Vec<&'static str> = vec![
+            "You currently have the following apps installed.",
+            "To install more, please contact your admin.",
+        ];
+        let expected = expected.join("\n");
+
+        assert_eq!(SOURCE, msg.0);
+        assert_eq!(expected, msg.1);
+
+        // Check that there's no additional messages
+        drop(state);
+        assert_eq!(None, sent.recv().await);
+    }
+
+    #[tokio::test]
+    async fn test_listapps_some_apps() {
+        let tmp_dir = TempDir::new("apps").expect("create tempdir failed!");
+        for i in 0..2 {
+            let file_path = tmp_dir.path().join(format!("app{}", i));
+            File::create(file_path).expect("create app failed!");
+        }
+
+        let (sender, mut sent) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": tmp_dir.path().to_str()
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+        state.listapps(SOURCE).await;
+
+        let msg = sent.recv().await.expect("Found no sent messages");
+        let expected: Vec<&'static str> = vec![
+            "You currently have the following apps installed.",
+            "To install more, please contact your admin.",
+            "app0 - mockapp app0",
+            "app1 - mockapp app1",
+        ];
+        let expected = expected.join("\n");
+
+        assert_eq!(SOURCE, msg.0);
+        assert_eq!(expected, msg.1);
+
+        // Check that there's no additional messages
+        drop(state);
+        assert_eq!(None, sent.recv().await);
+    }
+
+    #[tokio::test]
+    async fn test_listapps_cached() {
+        let tmp_dir = TempDir::new("apps").expect("create tempdir failed!");
+        for i in 0..2 {
+            let file_path = tmp_dir.path().join(format!("app{}", i));
+            File::create(file_path).expect("create app failed!");
+        }
+
+        let (sender, mut sent) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": tmp_dir.path().to_str()
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+        state.listapps(SOURCE).await;
+        state.listapps(SOURCE).await;
+
+        for _ in 0u8..2 {
+            let msg = sent.recv().await.expect("Found no sent messages");
+            let expected: Vec<&'static str> = vec![
+                "You currently have the following apps installed.",
+                "To install more, please contact your admin.",
+                "app0 - mockapp app0",
+                "app1 - mockapp app1",
+            ];
+            let expected = expected.join("\n");
+
+            assert_eq!(SOURCE, msg.0);
+            assert_eq!(expected, msg.1);
+        }
+
+        DESCRIPTIONQUERIES.with(|d| {
+            assert_eq!(*d.borrow(), 2);
+        });
+
+        // Check that there's no additional messages
+        drop(state);
+        assert_eq!(None, sent.recv().await);
+    }
+
+    #[tokio::test]
+    async fn test_startapp_sends_query() {
+        let tmp_dir = TempDir::new("apps").expect("create tempdir failed!");
+        let file_path = tmp_dir.path().join("app");
+        File::create(file_path).expect("create app failed!");
+
+        let (sender, _) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": tmp_dir.path().to_str()
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+
+        // TODO test that a query happened
+        state.startapp(SOURCE.into(), "app").await;
+        DESCRIPTIONQUERIES.with(|d| {
+            assert_eq!(*d.borrow(), 1);
+        });
+
+        // TODO test that no query happened
+        state.startapp("+other".into(), "app").await;
+        DESCRIPTIONQUERIES.with(|d| {
+            assert_eq!(*d.borrow(), 1);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_startapp_sends_start_msg() {
+        let tmp_dir = TempDir::new("apps").expect("create tempdir failed!");
+        let file_path = tmp_dir.path().join("app");
+        File::create(file_path).expect("create app failed!");
+
+        let (sender, _) = MockSender::new();
+        let config = serde_json::json!({
+            "appdir": tmp_dir.path().to_str()
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+
+        state.startapp(SOURCE.into(), "app").await;
+
+        let expected =
+            serde_json::json!({"type": "start", "user": SOURCE}).to_string();
+        assert_eq!(
+            vec![expected],
+            state.running_apps.get(SOURCE).unwrap().messages
+        );
     }
 }
