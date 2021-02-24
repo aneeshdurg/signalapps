@@ -7,6 +7,7 @@ use serde_json;
 use signal_hook::consts::signal::SIGINT;
 use signal_hook_tokio::Signals;
 
+mod app;
 mod appstate;
 mod comm;
 mod signalcli;

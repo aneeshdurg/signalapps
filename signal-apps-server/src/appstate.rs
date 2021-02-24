@@ -1,85 +1,13 @@
 use std::collections::HashMap;
 use std::io;
-use std::ops::Deref;
-use std::ops::DerefMut;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
 
 use async_std::fs;
-use futures::{pin_mut, StreamExt};
+use futures::StreamExt;
 use serde_json;
-use tokio::io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::net::UnixStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
+use crate::app::App;
 use crate::comm::Sender;
-
-async fn read_msg_from_stream(
-    stream: &mut ReadHalf<UnixStream>,
-) -> io::Result<String> {
-    let mut length = [0u8, 0, 0, 0];
-    let mut read = 0;
-    let mut failed = false;
-    loop {
-        match stream.read(&mut length[read..]).await {
-            Ok(0) => {
-                failed = true;
-                break;
-            }
-            Ok(n) => {
-                eprintln!("l read {} bytes", n);
-                read += n;
-                if read == 4 {
-                    break;
-                }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(_) => {
-                failed = true;
-                break;
-            }
-        }
-    }
-    if failed {
-        return Err(io::Error::new(io::ErrorKind::Other, "Failed to read"));
-    }
-
-    let length = u32::from_be_bytes(length) as usize;
-    eprintln!("Expecting {} bytes", length);
-
-    let mut content = Vec::with_capacity(length);
-    loop {
-        match stream.read_buf(&mut content).await {
-            Ok(0) => {
-                failed = true;
-                break;
-            }
-            Ok(n) => {
-                eprintln!("read {} bytes", n);
-                if content.len() == length {
-                    break;
-                }
-                continue;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(_) => {
-                failed = true;
-                break;
-            }
-        }
-    }
-    if failed {
-        return Err(io::Error::new(io::ErrorKind::Other, "Failed to read"));
-    }
-
-    String::from_utf8(content)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid utf-8"))
-}
 
 #[derive(Debug)]
 pub enum AppMsg {
@@ -87,157 +15,6 @@ pub enum AppMsg {
     EndMsg(String, u64),    // ends the given appid
     OutMsg(String, String), // Allows access to sender
     Finish,
-}
-
-struct App {
-    id: u64,
-    name: String,
-    user: String,
-    control: mpsc::Sender<AppMsg>,
-    tx: Option<Arc<Mutex<mpsc::Sender<String>>>>,
-    writer: Option<WriteHalf<UnixStream>>,
-    // TODO document protocol!
-}
-
-impl App {
-    fn new(
-        id: u64,
-        name: &str,
-        user: &str,
-        control: mpsc::Sender<AppMsg>,
-    ) -> Self {
-        let name = name.into();
-        let user = user.into();
-        // TODO using an enum placeholder instead of all these options and combine w/ start_stream
-        App {
-            id,
-            name,
-            user,
-            control,
-            tx: None,
-            writer: None,
-        }
-    }
-
-    fn get_id(&self) -> u64 {
-        self.id
-    }
-
-    fn start_stream(&mut self, stream: UnixStream) {
-        let (mut sr, sw) = split(stream);
-
-        let (tx, mut rx) = mpsc::channel(100);
-        let tx = Arc::new(Mutex::new(tx));
-
-        self.tx = Some(tx.clone());
-        self.writer = Some(sw);
-
-        let canceler = Arc::new(Mutex::new(false));
-        let id = self.id;
-
-        {
-            let user = self.user.clone();
-            let control = self.control.clone();
-            let canceler = canceler.clone();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                while let Ok(content) = loop {
-                    // Read, pausing every 500ms to check if we should cancel instead
-                    let reader = read_msg_from_stream(&mut sr);
-                    pin_mut!(reader);
-                    break loop {
-                        match tokio::time::timeout(
-                            Duration::from_millis(500),
-                            &mut reader,
-                        )
-                        .await
-                        {
-                            Ok(content) => {
-                                break content;
-                            }
-                            Err(_) => {
-                                if *canceler.lock().await.deref() {
-                                    break Err(io::Error::new(
-                                        io::ErrorKind::Other,
-                                        "Cancelling producer",
-                                    ));
-                                }
-                                continue;
-                            }
-                        }
-                    };
-                } {
-                    if let Err(_) = tx.lock().await.send(content).await {
-                        break;
-                    }
-                }
-                eprintln!("Closed app response producer");
-                control
-                    .send(AppMsg::EndMsg(user, id))
-                    .await
-                    .expect("Sending control msg failed!");
-            });
-        }
-
-        let user = self.user.clone();
-        let control = self.control.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                if msg.len() == 0 {
-                    break;
-                }
-
-                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&msg)
-                {
-                    let msg = match msg["type"].as_str() {
-                        Some("response") => AppMsg::OutMsg(
-                            user.clone(),
-                            msg["value"].as_str().unwrap_or("").into(),
-                        ),
-                        _ => AppMsg::EndMsg(user.clone(), id),
-                    };
-                    control
-                        .send(msg)
-                        .await
-                        .expect("Sending control msg failed!");
-                }
-            }
-
-            eprintln!("Closed app response consumer");
-            *canceler.lock().await.deref_mut() = true;
-        });
-    }
-
-    async fn cancel(&mut self) {
-        self.control
-            .send(AppMsg::InMsg(self.user.clone(), "endapp".into()))
-            .await
-            .expect("Sending control msg failed!");
-    }
-
-    async fn send_bytes(&mut self, bytes: &[u8]) -> bool {
-        if let Err(_) = self.writer.as_mut().unwrap().write_all(bytes).await {
-            self.cancel().await;
-            return false;
-        }
-        true
-    }
-
-    async fn send(&mut self, msg: &str) {
-        eprintln!("Sending msg {:?}", msg);
-        let _ = self.send_bytes(&(msg.len() as u32).to_be_bytes()).await
-            && self.send_bytes(msg.as_bytes()).await;
-        eprintln!("Sent msg {:?}", msg);
-    }
-
-    async fn stop(&mut self) {
-        match self.tx.take() {
-            Some(tx) => {
-                let _ = tx.lock().await.send("".into()).await;
-            }
-            None => {}
-        }
-    }
 }
 
 struct AppInfo {
@@ -301,11 +78,6 @@ impl<S: Sender> AppState<S> {
         eprintln!("done processing queue");
     }
 
-    async fn open_app_socket(&self, name: &str) -> io::Result<UnixStream> {
-        let path = Path::new(&self.app_dir).join(name);
-        Ok(UnixStream::connect(path).await?)
-    }
-
     async fn populate_app_cache(&mut self, name: &str) -> io::Result<()> {
         if self.app_cache.contains_key(name) {
             eprintln!("Found app inside cache");
@@ -313,27 +85,14 @@ impl<S: Sender> AppState<S> {
         }
 
         eprintln!("Found app outside cache, opening socket");
-        eprintln!("opened socket");
-        let stream = self.open_app_socket(name).await?;
-        let (mut sr, mut sw) = split(stream);
-
-        // write 1 char
-        let query = serde_json::json!({ "type": "query" }).to_string();
-        sw.write_all(&(query.len() as u32).to_be_bytes()).await?;
-        sw.write_all(query.as_bytes()).await?;
-        eprintln!("queried socket");
-
-        if let Ok(desc) = read_msg_from_stream(&mut sr).await {
-            if let Ok(desc) = serde_json::from_str::<serde_json::Value>(&desc) {
-                if let Some(desc) = desc["value"].as_str() {
-                    let name = name.to_string();
-                    let ident = name.clone();
-                    let desc = desc.into();
-                    self.app_cache.insert(ident, AppInfo { name, desc });
-                }
-            }
-        }
-
+        let desc = App::get_description(&self.app_dir, name).await?;
+        self.app_cache.insert(
+            name.to_string(),
+            AppInfo {
+                name: name.to_string(),
+                desc,
+            },
+        );
         Ok(())
     }
 
@@ -343,7 +102,7 @@ impl<S: Sender> AppState<S> {
         id
     }
 
-    pub async fn run_action(&mut self, source: String, msg: String) {
+    async fn run_action(&mut self, source: String, msg: String) {
         // TODO always send read receipt - that requires more info
         // Maybe eventually this method should take the json obj
         let msg_lower = msg.to_lowercase();
@@ -366,7 +125,7 @@ impl<S: Sender> AppState<S> {
                         }
 
                         let app_name = cmd[1];
-                        self.startapp(source ,app_name).await;
+                        self.startapp(source, app_name).await;
                     },
                 }
             }
@@ -377,7 +136,7 @@ impl<S: Sender> AppState<S> {
                 // If there's a running app return it's name
                 match self.running_apps.get(&source) {
                     None => self.send_no_apps(&source),
-                    Some(app) => self.sender.send(&source, &app.name),
+                    Some(app) => self.sender.send(&source, app.get_name()),
                 }
             }
             "endapp" => {
@@ -425,25 +184,21 @@ impl<S: Sender> AppState<S> {
         // The app might have been removed by endapp during the appinfo fetch
         // above.
         if let Some(mut app) = self.running_apps.remove(&source) {
-            match self.open_app_socket(app_name).await {
-                Ok(stream) => {
-                    app.start_stream(stream);
-                    let start_msg = serde_json::json!({
-                        "type": "start",
-                        "user": &source,
-                    })
-                    .to_string();
-                    app.send(&start_msg).await;
-                    self.running_apps.insert(source, app);
-                }
-                Err(_) => {
-                    self.sender.send(
-                        &source,
-                        "Could not start app, please notify your admin.",
-                    );
+            if let Err(_) = app.start_stream(&self.app_dir, app_name).await {
+                self.sender.send(
+                    &source,
+                    "Could not start app, please notify your admin.",
+                );
 
-                    // TODO remove it from app_cache
-                }
+            // TODO remove it from app_cache
+            } else {
+                let start_msg = serde_json::json!({
+                    "type": "start",
+                    "user": &source,
+                })
+                .to_string();
+                app.send(&start_msg).await;
+                self.running_apps.insert(source, app);
             }
         }
     }
@@ -498,7 +253,7 @@ impl<S: Sender> AppState<S> {
     }
 
     fn send_help(&self, dest: &str) {
-        // TODO
+        // TODO better msg
         self.sender.send(dest, "Welcome to signal-apps!");
     }
 
