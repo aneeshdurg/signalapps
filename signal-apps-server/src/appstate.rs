@@ -263,3 +263,97 @@ impl<App: app::App, S: Sender> AppState<App, S> {
             .send(dest, "You have no running apps. Send `help` to learn more.");
     }
 }
+
+#[cfg(test)]
+mod test {
+    use async_trait::async_trait;
+
+    use super::*;
+
+    pub struct MockSender {
+        channel: (
+            mpsc::UnboundedSender<(String, String)>,
+            mpsc::UnboundedReceiver<(String, String)>,
+        ),
+    }
+
+    impl MockSender {
+        fn new() -> Self {
+            MockSender {
+                channel: mpsc::unbounded_channel(),
+            }
+        }
+    }
+
+    impl Sender for MockSender {
+        fn send(&self, dest: &str, msg: &str) {
+            let sender = self.channel.0.clone();
+            sender.send((dest.to_string(), msg.to_string())).unwrap()
+        }
+    }
+
+    struct MockApp {
+        id: u64,
+        name: String,
+    }
+
+    #[async_trait]
+    impl app::App for MockApp {
+        async fn get_description(
+            _app_dir: &str,
+            _name: &str,
+        ) -> io::Result<String> {
+            Ok("mockapp".into())
+        }
+
+        fn new(
+            id: u64,
+            name: &str,
+            _user: &str,
+            _control: mpsc::Sender<AppMsg>,
+        ) -> Self {
+            MockApp {
+                id,
+                name: name.into(),
+            }
+        }
+
+        fn get_id(&self) -> u64 {
+            self.id
+        }
+
+        fn get_name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(
+            &mut self,
+            _app_dir: &str,
+            _name: &str,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn send(&mut self, _msg: &str) {}
+
+        async fn stop(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn test_finish() {
+        let sender = MockSender::new();
+        // TODO make tempdir
+        let config = serde_json::json!({
+            "appdir": "/tmp/test"
+        });
+        let new_app = AppState::new(config, sender);
+        let mut state: AppState<MockApp, MockSender> = new_app.0;
+        let state_queue = new_app.1;
+        state_queue
+            .send(AppMsg::Finish)
+            .await
+            .expect("Failed to send finish");
+        // This should exit immediately
+        state.process_queue().await;
+    }
+}
